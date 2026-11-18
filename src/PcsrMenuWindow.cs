@@ -350,16 +350,20 @@ namespace PeakCSR
             }
         }
 
-        // wrap=true 时允许换行 (状态类长文案), 默认单行省略以防串行压盖
+        // wrap=true 时允许换行 (状态类长文案), 否则强制单行
+        // 注意: TMP 的 Ellipsis 模式在矩形高度不足一行时会整行不渲染 (文字直接消失),
+        // 因此这里统一用 Overflow, 只把高度兜底到 1.35 倍字号以免挤动既有行距
         private static TextMeshProUGUI CreateText(
             Transform parent, string name, string text, float size, Color color,
             float x, float y, float w, float h, bool wrap = false)
         {
             TextMeshProUGUI label = PeakWindowStyle.CreateText(
                 parent, name, text, size, color, TextAlignmentOptions.Left);
-            NativeUiFactory.Place((RectTransform)label.transform, x, y, w, h);
+            float minHeight = size * 1.35f;
+            NativeUiFactory.Place((RectTransform)label.transform, x, y, w, Mathf.Max(h, minHeight));
             label.textWrappingMode = wrap ? TextWrappingModes.Normal : TextWrappingModes.NoWrap;
-            label.overflowMode = wrap ? TextOverflowModes.Overflow : TextOverflowModes.Ellipsis;
+            label.overflowMode = TextOverflowModes.Overflow;
+            label.margin = Vector4.zero;
             return label;
         }
 
@@ -785,7 +789,7 @@ namespace PeakCSR
                     NativeUiFactory.Place(titleRt, 30f, 0f, w - 60f - 110f, 74f);
                 }
                 titleText.textWrappingMode = TextWrappingModes.NoWrap;
-                titleText.overflowMode = TextOverflowModes.Ellipsis;
+                titleText.overflowMode = TextOverflowModes.Overflow;
                 titleText.alignment = TextAlignmentOptions.Left;
             }
 
