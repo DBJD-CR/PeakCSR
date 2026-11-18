@@ -61,6 +61,7 @@ namespace PeakCSR
             { "sign.idle", "<color=#{0}>PCSR 1v1</color>  <size=82%>• {1} ELO</size>" },
             { "hud.btn.native", "原生窗口" },
             { "win.opponent.placeholder", "等待中..." },
+            { "common.anonymous", "匿名玩家" },
 
             { "tier.sherpa", "夏尔巴 (下界合金)" },
             { "tier.alpinist", "登山家 (钻石)" },
@@ -180,6 +181,7 @@ namespace PeakCSR
             { "sign.idle", "<color=#{0}>PCSR 1v1</color>  <size=82%>• {1} ELO</size>" },
             { "hud.btn.native", "Native" },
             { "win.opponent.placeholder", "Waiting..." },
+            { "common.anonymous", "Anonymous" },
 
             { "tier.sherpa", "SHERPA (Netherite)" },
             { "tier.alpinist", "ALPINIST (Diamond)" },

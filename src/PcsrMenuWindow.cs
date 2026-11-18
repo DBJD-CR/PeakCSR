@@ -253,15 +253,15 @@ namespace PeakCSR
 
             CreateText(box, "LblFormat", CsrLoc.T("win.lbl.format"), 20f, PeakWindowStyle.Heading, BoxPad, 56f, inner, 26f);
 
-            // 三个赛制按钮按实际文字宽度顺序排布, 避免中文互相压盖
-            float cursor = BoxPad;
-            _btnStandard = CreateFitPill(box, "BtnStandard", CsrLoc.T("hud.format.standard"), ref cursor, 86f, 40f, 18f);
+            // 三个赛制按钮均分可用宽度, 左右内边距对称且绝不超出 Box
+            float gap = 10f;
+            float pillW = (inner - gap * 2f) / 3f;
+            float fmtY = 86f;
+            _btnStandard = PeakWindowStyle.CreatePill(box, "BtnStandard", CsrLoc.T("hud.format.standard"), BoxPad, fmtY, pillW, 40f, 17f);
             _btnStandard.onClick.AddListener(new UnityAction(OnStandardClicked));
-            cursor += 12f;
-            _btnHardcore = CreateFitPill(box, "BtnHardcore", CsrLoc.T("hud.format.hardcore"), ref cursor, 86f, 40f, 18f);
+            _btnHardcore = PeakWindowStyle.CreatePill(box, "BtnHardcore", CsrLoc.T("hud.format.hardcore"), BoxPad + pillW + gap, fmtY, pillW, 40f, 17f);
             _btnHardcore.onClick.AddListener(new UnityAction(OnHardcoreClicked));
-            cursor += 12f;
-            _btnSprint = CreateFitPill(box, "BtnSprint", CsrLoc.T("hud.format.sprint"), ref cursor, 86f, 40f, 18f);
+            _btnSprint = PeakWindowStyle.CreatePill(box, "BtnSprint", CsrLoc.T("hud.format.sprint"), BoxPad + (pillW + gap) * 2f, fmtY, pillW, 40f, 17f);
             _btnSprint.onClick.AddListener(new UnityAction(OnSprintClicked));
 
             CreateText(box, "LblAscentCaption", CsrLoc.T("win.lbl.ascent"), 20f, PeakWindowStyle.Heading, BoxPad, 142f, inner, 26f);
@@ -287,11 +287,15 @@ namespace PeakCSR
                 }
             }
 
-            float joinX = BoxPad + 210f;
-            Button join = CreateFitPill(box, "BtnJoin", CsrLoc.T("hud.invite.join"), ref joinX, 310f, 40f, 18f);
+            // 输入框 + 两个按钮三等分, 避免右侧溢出 Box
+            float actY = 310f;
+            float actGap = 10f;
+            float inputW = 200f;
+            float btnEach = (inner - inputW - actGap * 2f) / 2f;
+            float actX = BoxPad + inputW + actGap;
+            Button join = PeakWindowStyle.CreatePill(box, "BtnJoin", CsrLoc.T("hud.invite.join"), actX, actY, btnEach, 40f, 17f);
             join.onClick.AddListener(new UnityAction(OnJoinClicked));
-            joinX += 12f;
-            Button host = CreateFitPill(box, "BtnHost", CsrLoc.T("hud.invite.host"), ref joinX, 310f, 40f, 18f);
+            Button host = PeakWindowStyle.CreatePill(box, "BtnHost", CsrLoc.T("hud.invite.host"), actX + btnEach + actGap, actY, btnEach, 40f, 17f);
             host.onClick.AddListener(new UnityAction(OnHostClicked));
         }
 
@@ -326,7 +330,7 @@ namespace PeakCSR
         private void BuildBoardBox()
         {
             const float boxW = 1248f;
-            const float boxH = 396f;
+            const float boxH = 318f;
             RectTransform box = PeakWindowStyle.CreateBox(
                 _body, "BoxBoard", CsrLoc.T("win.box.board"), 26f, 8f + 392f + ColGap, boxW, boxH);
             float inner = boxW - BoxPad * 2f;
@@ -341,8 +345,8 @@ namespace PeakCSR
 
             for (int i = 0; i < _rows.Length; i++)
             {
-                _rows[i] = CreateText(box, "Row" + i, "", 20f, PeakWindowStyle.TextPrimary,
-                    BoxPad, 96f + i * 30f, inner, 30f);
+                _rows[i] = CreateText(box, "Row" + i, "", 19f, PeakWindowStyle.TextPrimary,
+                    BoxPad, 96f + i * 27f, inner, 26f);
             }
         }
 
@@ -357,17 +361,6 @@ namespace PeakCSR
             label.textWrappingMode = wrap ? TextWrappingModes.Normal : TextWrappingModes.NoWrap;
             label.overflowMode = wrap ? TextOverflowModes.Overflow : TextOverflowModes.Ellipsis;
             return label;
-        }
-
-        // 按文字实际宽度创建 pill, 并把 cursor 推进到下一个可用位置
-        private static Button CreateFitPill(
-            Transform parent, string name, string text, ref float cursor,
-            float y, float height, float fontSize)
-        {
-            float width = MeasurePillWidth(text, fontSize);
-            Button btn = PeakWindowStyle.CreatePill(parent, name, text, cursor, y, width, height, fontSize);
-            cursor += width;
-            return btn;
         }
 
         // 估算 pill 宽度: 中日韩字符按 1 个字宽算, 其余按 0.56 个字宽
@@ -540,6 +533,32 @@ namespace PeakCSR
                 Mc.IsRatedMatch ? ("● " + CsrLoc.T("hud.invite.rated")) : ("○ " + CsrLoc.T("hud.invite.unrated")));
         }
 
+        // 单个字段刷新失败不能拖垮整块面板
+        private static void Safe(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[PeakCSR] 面板刷新字段异常: " + ex.Message);
+            }
+        }
+
+        // MapCatalog 在主菜单阶段可能尚未就绪, 需要兜底
+        private static string SafeBiomeLabel(int levelIndex)
+        {
+            try
+            {
+                return MapCatalog.GetBiomeLabel(levelIndex) ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
         private void RefreshDynamic()
         {
             if (Mc == null)
@@ -548,26 +567,30 @@ namespace PeakCSR
                 return;
             }
 
-            if (_lblStatus != null) _lblStatus.text = CsrLoc.T("hud.status", Mc.StatusMessage);
-
-            string biome = MapCatalog.GetBiomeLabel(Mc.LevelIndex);
-            bool revealSeed = Mc.State == CsMatchState.Running || Mc.State == CsMatchState.Finished;
-            if (_lblRoom != null)
+            Safe(() =>
             {
+                if (_lblStatus != null) _lblStatus.text = CsrLoc.T("hud.status", Mc.StatusMessage);
+            });
+
+            Safe(() =>
+            {
+                if (_lblRoom == null) return;
                 _lblRoom.text = string.IsNullOrEmpty(Mc.InviteCode)
                     ? CsrLoc.T("win.room.none")
-                    : CsrLoc.T("win.room.info", Mc.InviteCode, Mc.LevelIndex, biome, Mc.Ascent,
-                        revealSeed ? Mc.Seed.ToString() : CsrLoc.T("hud.seed.hidden"));
-            }
+                    : CsrLoc.T("win.room.info", Mc.InviteCode, Mc.LevelIndex, SafeBiomeLabel(Mc.LevelIndex), Mc.Ascent,
+                        IsSeedRevealed() ? Mc.Seed.ToString() : CsrLoc.T("hud.seed.hidden"));
+            });
 
-            if (_lblOpponent != null)
+            Safe(() =>
             {
+                if (_lblOpponent == null) return;
                 string verify = Mc.OpponentVerified ? CsrLoc.T("hud.verified.ok") : CsrLoc.T("hud.verified.wait");
                 _lblOpponent.text = CsrLoc.T("hud.opponent", Mc.OpponentName, Mc.OpponentElo, verify);
-            }
+            });
 
-            if (_lblProgress != null)
+            Safe(() =>
             {
+                if (_lblProgress == null) return;
                 float mine = Mc.SelfProgress * 100f;
                 float theirs = Mc.OpponentProgress * 100f;
                 float diff = mine - theirs;
@@ -575,20 +598,26 @@ namespace PeakCSR
                 string sign = diff >= 0f ? "+" : "";
                 _lblProgress.text = CsrLoc.T("hud.progress",
                     mine.ToString("F1"), theirs.ToString("F1"), color, sign, diff.ToString("F1"));
-            }
+            });
 
-            if (_lblVitals != null)
+            Safe(() =>
             {
+                if (_lblVitals == null) return;
                 _lblVitals.text = Mc.State == CsMatchState.Running
                     ? CsrLoc.T("hud.vitals",
                         Mathf.RoundToInt(Mc.OpponentHealth * 100f),
                         Mathf.RoundToInt(Mc.OpponentStamina * 100f),
                         Mc.OpponentDown ? CsrLoc.T("hud.state.down") : CsrLoc.T("hud.state.climbing"))
                     : "";
-            }
+            });
 
             RefreshActionButtons();
             RefreshBoard();
+        }
+
+        private static bool IsSeedRevealed()
+        {
+            return Mc != null && (Mc.State == CsMatchState.Running || Mc.State == CsMatchState.Finished);
         }
 
         private void RefreshActionButtons()
@@ -649,31 +678,40 @@ namespace PeakCSR
 
         private void RefreshBoard()
         {
-            CloudLeaderboardService svc = CloudLeaderboardService.Instance;
-            if (_lblBoardMeta != null)
+            Safe(() =>
             {
+                CloudLeaderboardService svc = CloudLeaderboardService.Instance;
                 int count = svc != null && svc.Entries != null ? svc.Entries.Count : 0;
-                _lblBoardMeta.text = svc != null && !string.IsNullOrEmpty(svc.CloudStatus)
-                    ? svc.CloudStatus
-                    : CsrLoc.T("cloud.updated", count);
-            }
 
-            for (int i = 0; i < _rows.Length; i++)
-            {
-                if (_rows[i] == null) continue;
-                if (svc == null || svc.Entries == null || i >= svc.Entries.Count)
+                if (_lblBoardMeta != null)
                 {
-                    _rows[i].text = i == 0 && (svc == null || svc.Entries == null || svc.Entries.Count == 0)
-                        ? "<color=#8A93A5>" + CsrLoc.T("win.board.empty") + "</color>"
-                        : string.Empty;
-                    continue;
+                    // 有云端状态就显示状态(加载中/已同步/错误), 否则退化为条目数
+                    _lblBoardMeta.text = svc != null && !string.IsNullOrEmpty(svc.CloudStatus)
+                        ? svc.CloudStatus
+                        : CsrLoc.T("cloud.updated", count);
                 }
 
-                CloudRankEntry e = svc.Entries[i];
-                string tierHex = ColorUtility.ToHtmlStringRGB(RankedMenuIcons.GetTierColorOnLight(EloCalculator.GetVanillaTierKey(e.Elo)));
-                _rows[i].text = "<b>#" + e.Rank + "</b>   <color=#" + tierHex + ">" + e.PlayerName + "</color>   —   <b>"
-                    + e.Elo + " ELO</b>   (" + e.Wins + "W / " + e.Losses + "L)";
-            }
+                for (int i = 0; i < _rows.Length; i++)
+                {
+                    if (_rows[i] == null) continue;
+
+                    if (svc == null || svc.Entries == null || i >= svc.Entries.Count)
+                    {
+                        _rows[i].text = (i == 0 && count == 0)
+                            ? "<color=#8A93A5>" + CsrLoc.T("win.board.empty") + "</color>"
+                            : string.Empty;
+                        continue;
+                    }
+
+                    CloudRankEntry e = svc.Entries[i];
+                    string tierKey = EloCalculator.GetVanillaTierKey(e.Elo);
+                    string tierHex = ColorUtility.ToHtmlStringRGB(RankedMenuIcons.GetTierColorOnLight(tierKey));
+                    string name = PlayerNameSanitizer.Clean(e.PlayerName);
+                    if (string.IsNullOrEmpty(name)) name = CsrLoc.T("common.anonymous");
+                    _rows[i].text = "<b>#" + e.Rank + "</b>   <color=#" + tierHex + ">" + name + "</color>   —   <b>"
+                        + e.Elo + " ELO</b>   (" + e.Wins + "W / " + e.Losses + "L)";
+                }
+            });
         }
 
         private static void SetActive(Component comp, bool active)
