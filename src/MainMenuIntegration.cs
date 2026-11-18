@@ -26,8 +26,8 @@ namespace PeakCSR
         internal const float SignTailPadding = 22f;
         internal const float MinSignWidth = 190f;
         internal const float MaxSignWidth = 440f;
-        // 放在柱子最顶部: 与 RANKED 表头木牌的 y=190 平齐, 直接占据最显眼位置
-        internal const float SignY = 190f;
+        // RANKED 木牌自上而下，放在 Header 之上
+        internal const float SignY = 262f;
 
         private static Button _signButton;
 
@@ -80,8 +80,8 @@ namespace PeakCSR
             GameObject clone = UnityEngine.Object.Instantiate(template.gameObject, buttonsParent);
             clone.name = SignName;
             clone.SetActive(true);
-            // 置顶: 放在最上方, 让 PCSR 成为柱子上第一块木牌
-            clone.transform.SetAsFirstSibling();
+            // 置顶绘制: 万一同位置有其它木牌, 让 PCSR 显示在最上层
+            clone.transform.SetAsLastSibling();
 
             RectTransform rt = clone.GetComponent<RectTransform>();
             if (rt != null)
