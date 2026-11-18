@@ -33,6 +33,8 @@ namespace PeakCSR
         public const int BaseCsrAutoEndMagicMs = 2700100;
         public const string HandshakePrefix = "__PCSR1V1|";
         public const float RerollVoteTimeoutSeconds = 30f;
+        // 排队期间轮询大厅的间隔: 只拉一次会漏掉稍后才开房的对手, 双方各自建房永远碰不上
+        private const float LobbyPollIntervalSeconds = 2.5f;
 
         private static MatchController _instance;
         public static MatchController Instance { get { return _instance; } }
@@ -75,6 +77,13 @@ namespace PeakCSR
         private int _proposedLevelIndex;
         private int _proposedRoute;
         private bool _isSwitchingRerollRoom;
+
+        // 排队轮询与"入房后再次校验赛制"所需状态
+        private bool _lobbyFetchInFlight;
+        private float _nextLobbyPollTime;
+        private bool _strictRulesetJoin;
+        private McsrRuleFormat _pendingFormat;
+        private int _pendingAscent;
 
         public CsMatchState State { get { return _state; } }
         public McsrRuleFormat SelectedFormat
@@ -184,6 +193,12 @@ namespace PeakCSR
         {
             if (_state == CsMatchState.Idle || _state == CsMatchState.Finished) return;
 
+            // 排队期间持续轮询大厅, 避免单次 Fetch 抓不到稍后才开房的对手
+            if (_state == CsMatchState.SearchingLobby && !_lobbyFetchInFlight && Time.realtimeSinceStartup >= _nextLobbyPollTime)
+            {
+                PollLobbyQueue();
+            }
+
             // 检查 30s 投票换图超时
             if ((_myRerollVoteActive || _oppRerollVoteActive) && Time.realtimeSinceStartup >= _rerollVoteDeadline)
             {
@@ -243,11 +258,25 @@ namespace PeakCSR
             // 保留玩家在面板里选择的计分/练习开关, 不再强制覆盖为计分
             ResetMatchRuntime();
             _state = CsMatchState.SearchingLobby;
+            // 记下排队时选定的赛制指纹, 入房后拿它跟房主实际配置做二次校验
+            _strictRulesetJoin = true;
+            _pendingFormat = _selectedFormat;
+            _pendingAscent = SelectedAscent;
+
             string fmtName = GetCurrentFormatDisplayName();
             _statusMessage = CsrLoc.T("status.searching", fmtName);
             Plugin.Log.LogInfo("[PeakCSR] 开始搜索 PCSR 1v1 排位队列，当前赛制: " + fmtName);
             NotifyStateChanged();
 
+            PollLobbyQueue();
+        }
+
+        // 拉取一次大厅列表并记录冷却时间, 由 Update 在搜索阶段反复调用
+        private void PollLobbyQueue()
+        {
+            if (RaceService.Instance == null) return;
+            _lobbyFetchInFlight = true;
+            _nextLobbyPollTime = Time.realtimeSinceStartup + LobbyPollIntervalSeconds;
             RaceService.Instance.FetchLobbies(OnLobbiesFetched, OnLobbyError);
         }
 
@@ -261,6 +290,8 @@ namespace PeakCSR
             }
 
             ResetMatchRuntime();
+            // 私密房以房主配置为准, 客机按码进来后自动跟随, 不做严格校验
+            _strictRulesetJoin = false;
             _state = CsMatchState.SearchingLobby;
             CreateNew1v1Lobby(isPublicLobby: false);
         }
@@ -274,7 +305,8 @@ namespace PeakCSR
                 return;
             }
 
-            string cleanCode = (code ?? "").Trim().ToUpperInvariant();
+            // 房间码只允许字母与数字, 顺手过滤掉误输入的符号/富文本标签
+            string cleanCode = SanitizeInviteCode(code);
             if (string.IsNullOrEmpty(cleanCode))
             {
                 _statusMessage = CsrLoc.T("status.code_empty");
@@ -282,6 +314,8 @@ namespace PeakCSR
             }
 
             ResetMatchRuntime();
+            // 用邀请码约战时以房主赛制为准, 不做严格校验
+            _strictRulesetJoin = false;
             _state = CsMatchState.SearchingLobby;
             _statusMessage = CsrLoc.T("status.joining_code", cleanCode);
             Plugin.Log.LogInfo("[PeakCSR] 正在通过邀请码加入 1v1 房间: " + cleanCode);
@@ -292,34 +326,90 @@ namespace PeakCSR
 
         private void OnLobbiesFetched(List<RaceLobbyEntry> entries, int total)
         {
-            int expectedMagic = GetMagicAutoEndMs(_selectedFormat, SelectedAscent);
+            _lobbyFetchInFlight = false;
+
+            // 轮询期间可能已经进入房间或退出队列, 此时不应再动状态机
+            if (_state != CsMatchState.SearchingLobby) return;
+
             if (entries != null)
             {
                 for (int i = 0; i < entries.Count; i++)
                 {
                     RaceLobbyEntry item = entries[i];
-                    if (item != null &&
-                        item.IsLobby &&
-                        !item.IsFull &&
-                        item.Compatible &&
-                        item.MaxPlayers == 2 &&
-                        item.Players == 1 &&
-                        !item.ReviveDead &&
-                        !item.GhostsVisible &&
-                        item.SecretSeed &&
-                        item.AutoEndMs == expectedMagic &&
-                        !string.IsNullOrEmpty(item.InviteCode))
-                    {
-                        _statusMessage = CsrLoc.T("status.found_joining", item.InviteCode);
-                        Plugin.Log.LogInfo("[PeakCSR] 找到匹配的 PCSR 1v1 房间 [" + item.InviteCode + "]，正在加入...");
-                        NotifyStateChanged();
-                        RaceService.Instance.JoinRace(item.InviteCode, OnRaceJoined, OnLobbyError);
-                        return;
-                    }
+                    if (item == null) continue;
+
+                    // 逐条打印关键字段, 匹配不上时能直接从日志看出是哪个字段不一致
+                    Plugin.Log.LogInfo("[PeakCSR] 大厅候选 [" + item.InviteCode + "] 状态=" + item.Status
+                        + " 玩家=" + item.Players + "/" + item.MaxPlayers
+                        + " 天阶=" + item.Ascent + " 路线=" + item.Route
+                        + " autoEnd=" + item.AutoEndMs
+                        + " 复活=" + item.ReviveDead + " 幽灵=" + item.GhostsVisible
+                        + " 盲种=" + item.SecretSeed + " 兼容=" + item.Compatible);
+
+                    if (!IsMatchingLobby(item)) continue;
+
+                    _statusMessage = CsrLoc.T("status.found_joining", item.InviteCode);
+                    Plugin.Log.LogInfo("[PeakCSR] 找到匹配的 PCSR 1v1 房间 [" + item.InviteCode + "]，正在加入...");
+                    NotifyStateChanged();
+                    RaceService.Instance.JoinRace(item.InviteCode, OnRaceJoined, OnLobbyError);
+                    return;
                 }
             }
 
+            Plugin.Log.LogInfo("[PeakCSR] 当前没有符合赛制的大厅，创建新的 PCSR 1v1 房间。");
+            _state = CsMatchState.SearchingLobby;
             CreateNew1v1Lobby(isPublicLobby: true);
+        }
+
+        // 房间码清洗: 只保留字母数字并转大写
+        private static string SanitizeInviteCode(string code)
+        {
+            if (string.IsNullOrEmpty(code)) return "";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(code.Length);
+            for (int i = 0; i < code.Length; i++)
+            {
+                char c = code[i];
+                if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+                {
+                    sb.Append(char.ToUpperInvariant(c));
+                }
+            }
+            return sb.ToString();
+        }
+
+        // 用 天阶 + 路线 反推房间所属赛制: 天阶 0 = 全山标准, 路线 >0 = 单群系冲刺, 其余为高难天阶
+        private static bool TryDecodeRuleset(int ascent, int route, out McsrRuleFormat format, out int decodedAscent)
+        {
+            if (ascent <= 0)
+            {
+                format = McsrRuleFormat.StandardAllPeak;
+                decodedAscent = 0;
+                return route == 0;
+            }
+            format = route > 0 ? McsrRuleFormat.BiomeSprint : McsrRuleFormat.HardcoreAscent4;
+            decodedAscent = Mathf.Clamp(ascent, 1, 8);
+            return true;
+        }
+
+        // 判定大厅是否与本机赛制完全一致 (赛制 + 天阶 + 规则开关全等)
+        private bool IsMatchingLobby(RaceLobbyEntry item)
+        {
+            if (!item.IsLobby || item.IsFull || !item.Compatible) return false;
+            if (item.MaxPlayers != 2 || item.Players != 1) return false;
+            if (item.ReviveDead || item.GhostsVisible || !item.SecretSeed) return false;
+            if (string.IsNullOrEmpty(item.InviteCode)) return false;
+
+            // 首选: autoEndMs 魔数完全相等, 最严格
+            if (item.AutoEndMs == GetMagicAutoEndMs(_selectedFormat, SelectedAscent)) return true;
+
+            // 已经是 PCSR 房但魔数不同 => 赛制不同, 绝不匹配
+            if (IsPeakCsrMagicMs(item.AutoEndMs)) return false;
+
+            // 兜底: 服务端若改写了 autoEndMs, 退化为用 天阶/路线 推断赛制指纹
+            McsrRuleFormat fmt;
+            int asc;
+            if (!TryDecodeRuleset(item.Ascent, item.Route, out fmt, out asc)) return false;
+            return fmt == _selectedFormat && asc == SelectedAscent;
         }
 
         private void CreateNew1v1Lobby(bool isPublicLobby)
@@ -508,6 +598,30 @@ namespace PeakCSR
         private void OnRaceJoined(RaceInfo race)
         {
             if (race == null) return;
+
+            // 排队进房时, 若房主实际配置与本机所选赛制不同, 直接退出以免赛制错配
+            if (_strictRulesetJoin)
+            {
+                McsrRuleFormat hostFormat;
+                int hostAscent;
+                if (TryDecodeRuleset(race.Ascent, race.Route, out hostFormat, out hostAscent)
+                    && (hostFormat != _pendingFormat || hostAscent != _pendingAscent))
+                {
+                    _strictRulesetJoin = false;
+                    Plugin.Log.LogWarning("[PeakCSR] 赛制不一致，退出房间 [" + race.InviteCode + "]: 房主="
+                        + GetFormatDisplayName(hostFormat, hostAscent) + ", 本地="
+                        + GetFormatDisplayName(_pendingFormat, _pendingAscent));
+                    RaceService.Instance.LeaveRace();
+                    _state = CsMatchState.Idle;
+                    _statusMessage = CsrLoc.T("status.ruleset_mismatch",
+                        GetFormatDisplayName(hostFormat, hostAscent),
+                        GetFormatDisplayName(_pendingFormat, _pendingAscent));
+                    NotifyStateChanged();
+                    return;
+                }
+            }
+            _strictRulesetJoin = false;
+
             _inviteCode = race.InviteCode ?? "";
             _seed = race.Seed;
             _levelIndex = race.LevelIndex;
@@ -536,6 +650,17 @@ namespace PeakCSR
         private void OnLobbyError(string err)
         {
             _isSwitchingRerollRoom = false;
+            _lobbyFetchInFlight = false;
+
+            // 排队期间的偶发网络错误不应中断轮询, 只更新提示文案
+            if (_state == CsMatchState.SearchingLobby)
+            {
+                _statusMessage = CsrLoc.T("status.error", err);
+                Plugin.Log.LogWarning("[PeakCSR] 大厅轮询失败, 稍后重试: " + err);
+                NotifyStateChanged();
+                return;
+            }
+
             _state = CsMatchState.Idle;
             _statusMessage = CsrLoc.T("status.error", err);
             Plugin.Log.LogWarning("[PeakCSR] 匹配服务异常: " + err);
@@ -879,6 +1004,9 @@ namespace PeakCSR
             _myRerollVoteActive = false;
             _oppRerollVoteActive = false;
             _selfProgress = 0f;
+            _lobbyFetchInFlight = false;
+            _nextLobbyPollTime = 0f;
+            _strictRulesetJoin = false;
             ResetOpponentInfo();
         }
 

@@ -13,7 +13,7 @@ namespace PeakCSR
     {
         public const string PluginGuid = "com.peakcsr.ranked1v1";
         public const string PluginName = "PeakCSR";
-        public const string PluginVersion = "0.2.1";
+        public const string PluginVersion = "0.2.2";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;

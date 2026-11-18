@@ -1,6 +1,6 @@
 {
   "name": "PeakCSR",
-  "version_number": "0.2.1",
+  "version_number": "0.2.2",
   "website_url": "https://github.com/DBJD-CR/PeakCSR",
   "description": "PCSR 1v1 Live Ranked extension for PEAK RANKED. Features real-time same-seed 1v1 matchmaking, Sudden Death rulesets, WebSocket ELO handshake, a native RANKED-style main menu signpost and ladder window.",
   "dependencies": [

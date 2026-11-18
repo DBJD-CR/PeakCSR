@@ -280,9 +280,15 @@ namespace PeakCSR
             _inputInvite = PeakWindowStyle.CreateInputField(box, "InputInvite", "", BoxPad, 310f, 200f, 40f, 19f);
             if (_inputInvite != null)
             {
+                // RANKED 的 CreateInputField 默认 contentType 是 IntegerNumber, 字母会被直接丢弃,
+                // 房间码含字母, 这里放开为字母数字组合
+                _inputInvite.contentType = TMP_InputField.ContentType.Alphanumeric;
+                _inputInvite.characterValidation = TMP_InputField.CharacterValidation.Alphanumeric;
                 _inputInvite.characterLimit = 12;
                 if (_inputInvite.textComponent != null)
                 {
+                    // 关闭富文本, 避免输入内容被当成标签渲染成 <u>xxx</u>
+                    _inputInvite.textComponent.richText = false;
                     _inputInvite.textComponent.textWrappingMode = TextWrappingModes.NoWrap;
                 }
             }
