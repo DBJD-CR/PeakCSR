@@ -845,6 +845,7 @@ namespace PeakCSR
                     _inviteCode,
                     _opponentSteamId,
                     _opponentName,
+                    _opponentElo,
                     winnerSteamId,
                     _seed,
                     _levelIndex,

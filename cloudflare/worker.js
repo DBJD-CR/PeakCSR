@@ -98,6 +98,8 @@ async function handleMatchReport(body, env, corsHeaders) {
   const opponentId = String(body.opponentSteamId || "").trim();
   const reporterName = String(body.reporterName || "Player").trim().slice(0, 32);
   const opponentName = String(body.opponentName || "Opponent").trim().slice(0, 32);
+  const reporterSeedElo = clampSeedElo(body.reporterSeedElo);
+  const opponentSeedElo = clampSeedElo(body.opponentSeedElo);
   const winnerId = String(body.winnerSteamId || "").trim();
   const seed = parseInt(body.seed || "0", 10);
   const levelIndex = parseInt(body.levelIndex || "0", 10);
@@ -123,7 +125,7 @@ async function handleMatchReport(body, env, corsHeaders) {
   ).bind(inviteCode).first();
 
   if (existingSettled) {
-    const p = await getOrCreatePlayer(env, reporterId, reporterName);
+    const p = await getOrCreatePlayer(env, reporterId, reporterName, reporterSeedElo);
     return jsonResp({
       ok: true,
       status: "already_settled",
@@ -175,8 +177,10 @@ async function handleMatchReport(body, env, corsHeaders) {
   const loserId = verifiedWinnerId === reporterId ? opponentId : reporterId;
   const winnerName = verifiedWinnerId === reporterId ? reporterName : opponentName;
   const loserName = verifiedWinnerId === reporterId ? opponentName : reporterName;
+  const winnerSeedElo = verifiedWinnerId === reporterId ? reporterSeedElo : opponentSeedElo;
+  const loserSeedElo = verifiedWinnerId === reporterId ? opponentSeedElo : reporterSeedElo;
 
-  const settlement = await settleEloOnDb(env, inviteCode, verifiedWinnerId, winnerName, loserId, loserName, format, ascent, verifyMethod, now);
+  const settlement = await settleEloOnDb(env, inviteCode, verifiedWinnerId, winnerName, winnerSeedElo, loserId, loserName, loserSeedElo, format, ascent, verifyMethod, now);
   const myNewElo = reporterId === verifiedWinnerId ? settlement.winnerElo : settlement.loserElo;
   const myDelta = reporterId === verifiedWinnerId ? settlement.winnerDelta : settlement.loserDelta;
 
@@ -234,21 +238,28 @@ async function verifyWithVanillaRaceServer(env, inviteCode, playerA, playerB, ex
   }
 }
 
-async function getOrCreatePlayer(env, steamId, playerName) {
+function clampSeedElo(val) {
+  const n = parseInt(val || "1000", 10);
+  if (isNaN(n)) return 1000;
+  return Math.max(850, Math.min(1500, n));
+}
+
+async function getOrCreatePlayer(env, steamId, playerName, seedElo = 1000) {
   let row = await env.DB.prepare("SELECT * FROM players WHERE steam_id = ?").bind(steamId).first();
   if (!row) {
+    const initElo = clampSeedElo(seedElo);
     const now = Date.now();
     await env.DB.prepare(
-      "INSERT INTO players (steam_id, player_name, elo, peak_elo, wins, losses, streak, updated_at) VALUES (?, ?, 1000, 1000, 0, 0, 0, ?)"
-    ).bind(steamId, playerName || "Player", now).run();
-    row = { steam_id: steamId, player_name: playerName || "Player", elo: 1000, peak_elo: 1000, wins: 0, losses: 0, streak: 0 };
+      "INSERT INTO players (steam_id, player_name, elo, peak_elo, wins, losses, streak, updated_at) VALUES (?, ?, ?, ?, 0, 0, 0, ?)"
+    ).bind(steamId, playerName || "Player", initElo, initElo, now).run();
+    row = { steam_id: steamId, player_name: playerName || "Player", elo: initElo, peak_elo: initElo, wins: 0, losses: 0, streak: 0 };
   }
   return row;
 }
 
-async function settleEloOnDb(env, inviteCode, winnerId, winnerName, loserId, loserName, format, ascent, verifyMethod, now) {
-  const winPlayer = await getOrCreatePlayer(env, winnerId, winnerName);
-  const losePlayer = await getOrCreatePlayer(env, loserId, loserName);
+async function settleEloOnDb(env, inviteCode, winnerId, winnerName, winnerSeedElo, loserId, loserName, loserSeedElo, format, ascent, verifyMethod, now) {
+  const winPlayer = await getOrCreatePlayer(env, winnerId, winnerName, winnerSeedElo);
+  const losePlayer = await getOrCreatePlayer(env, loserId, loserName, loserSeedElo);
 
   const mult = getModeMultiplier(format, ascent);
   const winExpected = 1.0 / (1.0 + Math.pow(10.0, (losePlayer.elo - winPlayer.elo) / 400.0));

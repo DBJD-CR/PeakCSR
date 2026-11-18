@@ -102,6 +102,7 @@ namespace PeakCSR
             string inviteCode,
             string opponentSteamId,
             string opponentName,
+            int opponentElo,
             string winnerSteamId,
             int seed,
             int levelIndex,
@@ -110,7 +111,7 @@ namespace PeakCSR
             long durationMs)
         {
             if (!IsCloudConfigured() || string.IsNullOrEmpty(inviteCode) || string.IsNullOrEmpty(opponentSteamId)) return;
-            StartCoroutine(ReportMatchRoutine(inviteCode, opponentSteamId, opponentName, winnerSteamId, seed, levelIndex, ascent, (int)format, durationMs));
+            StartCoroutine(ReportMatchRoutine(inviteCode, opponentSteamId, opponentName, opponentElo, winnerSteamId, seed, levelIndex, ascent, (int)format, durationMs));
         }
 
         private IEnumerator FetchMyProfileRoutine()
@@ -196,6 +197,7 @@ namespace PeakCSR
             string inviteCode,
             string opponentSteamId,
             string opponentName,
+            int opponentElo,
             string winnerSteamId,
             int seed,
             int levelIndex,
@@ -206,6 +208,8 @@ namespace PeakCSR
             string mySteamId = SteamIdentity.GetSteamId64();
             string myName = PlayerNameSanitizer.Current();
             string cleanCode = inviteCode.Trim().ToUpperInvariant();
+            int mySeedElo = Mathf.Clamp(EloCalculator.SeedElo, EloCalculator.MinSeedElo, EloCalculator.MaxSeedElo);
+            int oppSeedElo = Mathf.Clamp(opponentElo, EloCalculator.MinSeedElo, EloCalculator.MaxSeedElo);
 
             string rawSigStr = cleanCode + "|" + mySteamId + "|" + opponentSteamId + "|" + winnerSteamId + "|" + seed + "|" + ascent + "|" + format + "|" + SharedCloudSalt;
             string sig = ComputeSha256Hex16(rawSigStr);
@@ -217,6 +221,8 @@ namespace PeakCSR
                 ["opponentSteamId"] = opponentSteamId,
                 ["reporterName"] = myName,
                 ["opponentName"] = opponentName,
+                ["reporterSeedElo"] = mySeedElo,
+                ["opponentSeedElo"] = oppSeedElo,
                 ["winnerSteamId"] = winnerSteamId,
                 ["seed"] = seed,
                 ["levelIndex"] = levelIndex,

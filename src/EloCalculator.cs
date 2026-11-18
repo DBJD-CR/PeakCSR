@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using BepInEx;
+using RankedPeak.Models;
 using RankedPeak.Services;
 using UnityEngine;
 
@@ -17,9 +18,14 @@ namespace PeakCSR
         private const string IntegritySalt = "PEAKCSR_1V1_SALT_2026";
         private const int MaxRecentMatchesAgainstSameOpponent = 3;
         private const long OpponentWindowMinutes = 30;
+        public const int MinSeedElo = 850;
+        public const int MaxSeedElo = 1500;
 
         private static int _currentElo = 1000;
         private static int _peakElo = 1000;
+        private static int _seedElo = 1000;
+        private static bool _seededFromVanilla;
+        private static bool _vanillaHooked;
         private static int _wins;
         private static int _losses;
         private static int _draws;
@@ -29,6 +35,8 @@ namespace PeakCSR
 
         public static int CurrentElo { get { return _currentElo; } }
         public static int PeakElo { get { return _peakElo; } }
+        public static int SeedElo { get { return _seedElo; } }
+        public static bool SeededFromVanilla { get { return _seededFromVanilla; } }
         public static int Wins { get { return _wins; } }
         public static int Losses { get { return _losses; } }
         public static int Draws { get { return _draws; } }
@@ -93,21 +101,33 @@ namespace PeakCSR
             return ascentMult;
         }
 
+        // 软折算公式：1000 + (原版ELO - 1000) * 0.5，限制在 850 ~ 1500 之间
+        public static int ComputeSoftResetSeedElo(int vanillaElo)
+        {
+            int soft = (int)Math.Round(1000.0 + (vanillaElo - 1000.0) * 0.5);
+            return Mathf.Clamp(soft, MinSeedElo, MaxSeedElo);
+        }
+
         public static void Load(int defaultElo)
         {
             _currentElo = defaultElo;
             _peakElo = defaultElo;
+            _seedElo = defaultElo;
+            _seededFromVanilla = false;
             try
             {
                 if (!File.Exists(SavePath))
                 {
                     Save();
+                    HookVanillaRatingSeed();
                     return;
                 }
 
                 string json = File.ReadAllText(SavePath);
                 int elo = ReadInt(json, "elo", defaultElo);
                 int peak = ReadInt(json, "peakElo", elo);
+                int seed = ReadInt(json, "seedElo", elo);
+                int seededFlag = ReadInt(json, "seededFromVanilla", 0);
                 int wins = ReadInt(json, "wins", 0);
                 int losses = ReadInt(json, "losses", 0);
                 int draws = ReadInt(json, "draws", 0);
@@ -120,16 +140,21 @@ namespace PeakCSR
                     Plugin.Log.LogWarning("[PeakCSR] 检测到本地 ELO 存档签名校验不一致，已重置为初始分数。");
                     _currentElo = defaultElo;
                     _peakElo = defaultElo;
+                    _seedElo = defaultElo;
+                    _seededFromVanilla = false;
                     _wins = 0;
                     _losses = 0;
                     _draws = 0;
                     _streak = 0;
                     Save();
+                    HookVanillaRatingSeed();
                     return;
                 }
 
                 _currentElo = Mathf.Clamp(elo, 100, 5000);
                 _peakElo = Mathf.Max(_currentElo, peak);
+                _seedElo = Mathf.Clamp(seed, MinSeedElo, MaxSeedElo);
+                _seededFromVanilla = seededFlag != 0;
                 _wins = Mathf.Max(0, wins);
                 _losses = Mathf.Max(0, losses);
                 _draws = Mathf.Max(0, draws);
@@ -139,6 +164,39 @@ namespace PeakCSR
             {
                 Plugin.Log.LogWarning("[PeakCSR] 读取本地 ELO 存档失败，使用默认分数: " + ex.Message);
             }
+
+            HookVanillaRatingSeed();
+        }
+
+        private static void HookVanillaRatingSeed()
+        {
+            if (!_vanillaHooked)
+            {
+                _vanillaHooked = true;
+                RatingService.RatingUpdated += OnVanillaRatingUpdated;
+            }
+            if (RatingService.Instance != null && RatingService.Instance.CurrentRating != null)
+            {
+                OnVanillaRatingUpdated(RatingService.Instance.CurrentRating);
+            }
+        }
+
+        // 当玩家在 PCSR 仍为 0 场对局且尚未继承过原版分数时，自动只读获取原版已定级 ELO 并软折算为初始分
+        private static void OnVanillaRatingUpdated(PlayerRating rating)
+        {
+            if (_seededFromVanilla) return;
+            if (_wins > 0 || _losses > 0 || _draws > 0) return;
+            if (rating == null || !rating.Ranked || rating.Elo <= 0) return;
+            if (string.Equals(rating.Tier, "UNRANKED", StringComparison.OrdinalIgnoreCase)) return;
+
+            int softSeed = ComputeSoftResetSeedElo(rating.Elo);
+            _seedElo = softSeed;
+            _currentElo = softSeed;
+            _peakElo = softSeed;
+            _seededFromVanilla = true;
+            Save();
+            Plugin.Log.LogInfo("[PeakCSR] 已根据原版 RANKED 历史分数 (" + rating.Elo + " ELO) 软折算初始化 PCSR 种子分: " + softSeed + " ELO (场次保持 0W/0L)");
+            if (OnRatingChanged != null) OnRatingChanged();
         }
 
         // 校验是否存在短时间同对手刷分行为，返回衰减系数 (0.0 ~ 1.0)
@@ -272,6 +330,8 @@ namespace PeakCSR
                 sb.AppendLine("{");
                 sb.AppendLine("  \"elo\": " + _currentElo + ",");
                 sb.AppendLine("  \"peakElo\": " + _peakElo + ",");
+                sb.AppendLine("  \"seedElo\": " + _seedElo + ",");
+                sb.AppendLine("  \"seededFromVanilla\": " + (_seededFromVanilla ? 1 : 0) + ",");
                 sb.AppendLine("  \"wins\": " + _wins + ",");
                 sb.AppendLine("  \"losses\": " + _losses + ",");
                 sb.AppendLine("  \"draws\": " + _draws + ",");
