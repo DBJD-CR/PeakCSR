@@ -1,5 +1,23 @@
 ﻿$ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
+
+# 游戏运行时 DLL 会被进程锁定, 复制会抛 IOException; 这里做带提示的重试
+function Copy-WithRetry {
+    param([string]$Source, [string]$Target, [int]$Retries = 15)
+    for ($i = 1; $i -le $Retries; $i++) {
+        try {
+            Copy-Item -Path $Source -Destination $Target -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($i -eq $Retries) { throw }
+            if ($i -eq 1) {
+                Write-Host "[PeakCSR] 目标文件被占用 (游戏可能在运行), 等待释放..." -ForegroundColor DarkYellow
+            }
+            Start-Sleep -Milliseconds 700
+        }
+    }
+}
 $BinDir      = Join-Path $ProjectRoot "bin"
 $ProfileRoot = "C:\Users\ASUS\AppData\Roaming\Thunderstore Mod Manager\DataFolder\PEAK\profiles\RANKED"
 
@@ -56,7 +74,7 @@ if (-not (Test-Path $iconPath)) {
 }
 
 # 2. 部署到 Thunderstore Profile
-Copy-Item -Path $outDll -Destination (Join-Path $DeployDir "PeakCSR.dll") -Force
+Copy-WithRetry -Source $outDll -Target (Join-Path $DeployDir "PeakCSR.dll")
 Copy-Item -Path (Join-Path $ProjectRoot "manifest.json") -Destination (Join-Path $DeployDir "manifest.json") -Force
 Copy-Item -Path (Join-Path $ProjectRoot "README.md") -Destination (Join-Path $DeployDir "README.md") -Force
 if (Test-Path $iconPath) {
@@ -69,7 +87,7 @@ if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 $tempPack = Join-Path $BinDir "_pack_temp"
 if (Test-Path $tempPack) { Remove-Item $tempPack -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $tempPack | Out-Null
-Copy-Item -Path $outDll -Destination (Join-Path $tempPack "PeakCSR.dll") -Force
+Copy-WithRetry -Source $outDll -Target (Join-Path $tempPack "PeakCSR.dll")
 Copy-Item -Path (Join-Path $ProjectRoot "manifest.json") -Destination (Join-Path $tempPack "manifest.json") -Force
 Copy-Item -Path (Join-Path $ProjectRoot "README.md") -Destination (Join-Path $tempPack "README.md") -Force
 if (Test-Path $iconPath) {

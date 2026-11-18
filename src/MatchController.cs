@@ -50,7 +50,8 @@ namespace PeakCSR
         private int _route;
 
         private string _opponentSteamId = "";
-        private string _opponentName = "Waiting...";
+        // 空字符串表示占位, 显示时再按当前语言取文案
+        private string _opponentName = "";
         private int _opponentElo = 1000;
         private bool _opponentVerified;
         private float _opponentProgress;
@@ -91,11 +92,16 @@ namespace PeakCSR
             get { return _isRatedMatch; }
             set { if (_state == CsMatchState.Idle) _isRatedMatch = value; }
         }
+        // 待机态不缓存文案, 否则插件 Awake 时语言尚未就绪会把英文固化下来
         public string StatusMessage
         {
             get
             {
-                return string.IsNullOrEmpty(_statusMessage) ? CsrLoc.T("status.ready") : _statusMessage;
+                if (_state == CsMatchState.Idle || string.IsNullOrEmpty(_statusMessage))
+                {
+                    return CsrLoc.T("status.ready");
+                }
+                return _statusMessage;
             }
         }
         public string InviteCode { get { return _inviteCode; } }
@@ -104,7 +110,10 @@ namespace PeakCSR
         public int Ascent { get { return _ascent; } }
         public int Route { get { return _route; } }
         public string OpponentSteamId { get { return _opponentSteamId; } }
-        public string OpponentName { get { return _opponentName; } }
+        public string OpponentName
+        {
+            get { return string.IsNullOrEmpty(_opponentName) ? CsrLoc.T("win.opponent.placeholder") : _opponentName; }
+        }
         public int OpponentElo { get { return _opponentElo; } }
         public bool OpponentVerified { get { return _opponentVerified; } }
         public float OpponentProgress { get { return _opponentProgress; } }
@@ -691,7 +700,7 @@ namespace PeakCSR
                     _handshakeAcked = false;
                     _nextHandshakeSendTime = 0f;
                 }
-                _opponentName = !string.IsNullOrEmpty(opp.PlayerName) ? opp.PlayerName : "Opponent";
+                _opponentName = opp.PlayerName ?? "";
                 _opponentProgress = opp.Progress;
                 _opponentStamina = opp.Stamina ?? 1f;
                 _opponentHealth = opp.Health ?? 1f;
@@ -875,7 +884,7 @@ namespace PeakCSR
         private void ResetOpponentInfo()
         {
             _opponentSteamId = "";
-            _opponentName = "Waiting...";
+            _opponentName = "";
             _opponentElo = 1000;
             _opponentVerified = false;
             _handshakeAcked = false;

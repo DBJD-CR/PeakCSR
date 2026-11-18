@@ -12,11 +12,12 @@ namespace PeakCSR
     // 复刻 RANKED 原生窗口观感 (蓝白标题栏 + 分区 Box + pill 按钮 + 点线分隔)
     public class PcsrMenuWindow : MonoBehaviour
     {
-        private const float WindowWidth = 1280f;
-        private const float WindowHeight = 820f;
+        private const float WindowWidth = 1300f;
+        private const float WindowHeight = 840f;
         private const float TitleBarHeight = 82f;
         private const float BoxPad = 24f;
         private const float RefreshInterval = 0.2f;
+        private const float ColGap = 18f;
 
         private static PcsrMenuWindow _instance;
         public static PcsrMenuWindow Instance { get { return _instance; } }
@@ -244,89 +245,147 @@ namespace PeakCSR
         // 2. 左: 赛制与设置
         private void BuildRulesBox()
         {
+            const float boxW = 600f;
+            const float boxH = 392f;
             RectTransform box = PeakWindowStyle.CreateBox(
-                _body, "BoxRules", CsrLoc.T("win.box.ruleset"), 26f, 8f, 560f, 352f);
-            float inner = 560f - BoxPad * 2f;
+                _body, "BoxRules", CsrLoc.T("win.box.ruleset"), 26f, 8f, boxW, boxH);
+            float inner = boxW - BoxPad * 2f;
 
-            CreateText(box, "LblFormat", CsrLoc.T("win.lbl.format"), 20f, PeakWindowStyle.Heading, 24f, 58f, inner, 26f);
+            CreateText(box, "LblFormat", CsrLoc.T("win.lbl.format"), 20f, PeakWindowStyle.Heading, BoxPad, 56f, inner, 26f);
 
-            _btnStandard = PeakWindowStyle.CreatePill(box, "BtnStandard", CsrLoc.T("hud.format.standard"), 24f, 88f, 160f, 38f, 18f);
+            // 三个赛制按钮按实际文字宽度顺序排布, 避免中文互相压盖
+            float cursor = BoxPad;
+            _btnStandard = CreateFitPill(box, "BtnStandard", CsrLoc.T("hud.format.standard"), ref cursor, 86f, 40f, 18f);
             _btnStandard.onClick.AddListener(new UnityAction(OnStandardClicked));
-            _btnHardcore = PeakWindowStyle.CreatePill(box, "BtnHardcore", CsrLoc.T("hud.format.hardcore"), 192f, 88f, 176f, 38f, 18f);
+            cursor += 12f;
+            _btnHardcore = CreateFitPill(box, "BtnHardcore", CsrLoc.T("hud.format.hardcore"), ref cursor, 86f, 40f, 18f);
             _btnHardcore.onClick.AddListener(new UnityAction(OnHardcoreClicked));
-            _btnSprint = PeakWindowStyle.CreatePill(box, "BtnSprint", CsrLoc.T("hud.format.sprint"), 376f, 88f, 160f, 38f, 18f);
+            cursor += 12f;
+            _btnSprint = CreateFitPill(box, "BtnSprint", CsrLoc.T("hud.format.sprint"), ref cursor, 86f, 40f, 18f);
             _btnSprint.onClick.AddListener(new UnityAction(OnSprintClicked));
 
-            CreateText(box, "LblAscentCaption", CsrLoc.T("win.lbl.ascent"), 20f, PeakWindowStyle.Heading, 24f, 138f, inner, 26f);
+            CreateText(box, "LblAscentCaption", CsrLoc.T("win.lbl.ascent"), 20f, PeakWindowStyle.Heading, BoxPad, 142f, inner, 26f);
 
-            _btnAscentMinus = PeakWindowStyle.CreatePill(box, "BtnAscentMinus", "-", 24f, 168f, 40f, 38f, 22f);
+            _btnAscentMinus = PeakWindowStyle.CreatePill(box, "BtnAscentMinus", "-", BoxPad, 172f, 44f, 40f, 22f);
             _btnAscentMinus.onClick.AddListener(new UnityAction(OnAscentMinus));
-            _lblAscent = CreateText(box, "LblAscent", "A4", 20f, PeakWindowStyle.TextPrimary, 68f, 168f, 180f, 38f);
-            _btnAscentPlus = PeakWindowStyle.CreatePill(box, "BtnAscentPlus", "+", 252f, 168f, 40f, 38f, 22f);
+            _lblAscent = CreateText(box, "LblAscent", "A4", 20f, PeakWindowStyle.TextPrimary, BoxPad + 54f, 172f, 150f, 40f);
+            _btnAscentPlus = PeakWindowStyle.CreatePill(box, "BtnAscentPlus", "+", BoxPad + 212f, 172f, 44f, 40f, 22f);
             _btnAscentPlus.onClick.AddListener(new UnityAction(OnAscentPlus));
-            _lblMultiplier = CreateText(box, "LblMult", "", 19f, PeakWindowStyle.TextMuted, 300f, 168f, 236f, 38f);
+            _lblMultiplier = CreateText(box, "LblMult", "", 19f, PeakWindowStyle.TextMuted, BoxPad + 268f, 172f, inner - 268f, 40f);
 
-            _btnRated = PeakWindowStyle.CreatePill(box, "BtnRated", CsrLoc.T("hud.invite.rated"), 24f, 218f, 210f, 38f, 18f);
+            _btnRated = PeakWindowStyle.CreatePill(box, "BtnRated", CsrLoc.T("hud.invite.rated"), BoxPad, 228f, 240f, 40f, 18f);
             _btnRated.onClick.AddListener(new UnityAction(OnRatedToggled));
 
-            CreateText(box, "LblInvite", CsrLoc.T("win.lbl.invite"), 20f, PeakWindowStyle.Heading, 24f, 268f, inner, 26f);
-            _inputInvite = PeakWindowStyle.CreateInputField(box, "InputInvite", "", 24f, 296f, 196f, 38f, 19f);
-            if (_inputInvite != null) _inputInvite.characterLimit = 12;
+            CreateText(box, "LblInvite", CsrLoc.T("win.lbl.invite"), 20f, PeakWindowStyle.Heading, BoxPad, 280f, inner, 26f);
+            _inputInvite = PeakWindowStyle.CreateInputField(box, "InputInvite", "", BoxPad, 310f, 200f, 40f, 19f);
+            if (_inputInvite != null)
+            {
+                _inputInvite.characterLimit = 12;
+                if (_inputInvite.textComponent != null)
+                {
+                    _inputInvite.textComponent.textWrappingMode = TextWrappingModes.NoWrap;
+                }
+            }
 
-            Button join = PeakWindowStyle.CreatePill(box, "BtnJoin", CsrLoc.T("hud.invite.join"), 228f, 296f, 130f, 38f, 18f);
+            float joinX = BoxPad + 210f;
+            Button join = CreateFitPill(box, "BtnJoin", CsrLoc.T("hud.invite.join"), ref joinX, 310f, 40f, 18f);
             join.onClick.AddListener(new UnityAction(OnJoinClicked));
-            Button host = PeakWindowStyle.CreatePill(box, "BtnHost", CsrLoc.T("hud.invite.host"), 366f, 296f, 170f, 38f, 18f);
+            joinX += 12f;
+            Button host = CreateFitPill(box, "BtnHost", CsrLoc.T("hud.invite.host"), ref joinX, 310f, 40f, 18f);
             host.onClick.AddListener(new UnityAction(OnHostClicked));
         }
 
         // 3. 右: 对局状态
         private void BuildMatchBox()
         {
+            const float boxW = 630f;
+            const float boxH = 392f;
+            float boxX = 26f + 600f + ColGap;
             RectTransform box = PeakWindowStyle.CreateBox(
-                _body, "BoxMatch", CsrLoc.T("win.box.match"), 604f, 8f, 650f, 352f);
-            float inner = 650f - BoxPad * 2f;
+                _body, "BoxMatch", CsrLoc.T("win.box.match"), boxX, 8f, boxW, boxH);
+            float inner = boxW - BoxPad * 2f;
 
-            _lblStatus = CreateText(box, "LblStatus", "", 21f, PeakWindowStyle.TextPrimary, 24f, 56f, inner, 54f);
-            _lblRoom = CreateText(box, "LblRoom", "", 19f, PeakWindowStyle.TextMuted, 24f, 116f, inner, 26f);
-            _lblOpponent = CreateText(box, "LblOpponent", "", 19f, PeakWindowStyle.TextMuted, 24f, 146f, inner, 26f);
-            _lblProgress = CreateText(box, "LblProgress", "", 19f, PeakWindowStyle.TextPrimary, 24f, 178f, inner, 26f);
-            _lblVitals = CreateText(box, "LblVitals", "", 19f, PeakWindowStyle.TextMuted, 24f, 208f, inner, 26f);
+            // 状态文案允许两行, 其余字段统一单行不换行
+            _lblStatus = CreateText(box, "LblStatus", "", 20f, PeakWindowStyle.TextPrimary, BoxPad, 58f, inner, 56f, wrap: true);
+            _lblRoom = CreateText(box, "LblRoom", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 122f, inner, 26f);
+            _lblOpponent = CreateText(box, "LblOpponent", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 152f, inner, 26f);
+            _lblProgress = CreateText(box, "LblProgress", "", 19f, PeakWindowStyle.TextPrimary, BoxPad, 182f, inner, 26f);
+            _lblVitals = CreateText(box, "LblVitals", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 212f, inner, 26f);
 
-            _btnAction = PeakWindowStyle.CreatePill(box, "BtnAction", CsrLoc.T("hud.btn.queue"), 24f, 252f, 210f, 40f, 19f);
+            // 操作按钮分两行摆放, 换图文案较长时也不会互相压盖
+            _btnAction = PeakWindowStyle.CreatePill(box, "BtnAction", CsrLoc.T("hud.btn.queue"), BoxPad, 252f, 300f, 42f, 19f);
             _btnAction.onClick.AddListener(new UnityAction(OnActionClicked));
-            _btnReroll = PeakWindowStyle.CreatePill(box, "BtnReroll", CsrLoc.T("hud.btn.reroll"), 242f, 252f, 196f, 40f, 18f);
+
+            _btnReroll = PeakWindowStyle.CreatePill(box, "BtnReroll", CsrLoc.T("hud.btn.reroll"), BoxPad, 306f, 290f, 40f, 18f);
             _btnReroll.onClick.AddListener(new UnityAction(OnRerollClicked));
-            _btnForfeit = PeakWindowStyle.CreatePill(box, "BtnForfeit", CsrLoc.T("hud.btn.forfeit"), 446f, 252f, 180f, 40f, 18f);
+            _btnForfeit = PeakWindowStyle.CreatePill(box, "BtnForfeit", CsrLoc.T("hud.btn.forfeit"), BoxPad + 302f, 306f, 200f, 40f, 18f);
             _btnForfeit.onClick.AddListener(new UnityAction(OnForfeitClicked));
         }
 
         // 4. 下: 全服天梯
         private void BuildBoardBox()
         {
+            const float boxW = 1248f;
+            const float boxH = 396f;
             RectTransform box = PeakWindowStyle.CreateBox(
-                _body, "BoxBoard", CsrLoc.T("win.box.board"), 26f, 378f, 1228f, 320f);
-            float inner = 1228f - BoxPad * 2f;
+                _body, "BoxBoard", CsrLoc.T("win.box.board"), 26f, 8f + 392f + ColGap, boxW, boxH);
+            float inner = boxW - BoxPad * 2f;
 
-            _lblBoardMeta = CreateText(box, "LblMeta", "", 19f, PeakWindowStyle.TextMuted, 24f, 56f, inner - 200f, 24f);
-            _btnRefreshBoard = PeakWindowStyle.CreatePill(box, "BtnRefreshBoard", CsrLoc.T("hud.btn.refresh_board"), 1228f - BoxPad - 196f, 50f, 172f, 34f, 17f);
+            _lblBoardMeta = CreateText(box, "LblMeta", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 56f, inner - 220f, 26f);
+            _btnRefreshBoard = PeakWindowStyle.CreatePill(
+                box, "BtnRefreshBoard", CsrLoc.T("hud.btn.refresh_board"),
+                boxW - BoxPad - 180f, 50f, 180f, 36f, 17f);
             _btnRefreshBoard.onClick.AddListener(new UnityAction(OnRefreshBoardClicked));
 
-            PeakWindowStyle.CreateSeparator(box, "BoardSep", 24f, 84f, inner);
+            PeakWindowStyle.CreateSeparator(box, "BoardSep", BoxPad, 86f, inner);
 
             for (int i = 0; i < _rows.Length; i++)
             {
-                _rows[i] = CreateText(box, "Row" + i, "", 20f, PeakWindowStyle.TextPrimary, 24f, 92f + i * 25f, inner, 24f);
+                _rows[i] = CreateText(box, "Row" + i, "", 20f, PeakWindowStyle.TextPrimary,
+                    BoxPad, 96f + i * 30f, inner, 30f);
             }
         }
 
+        // wrap=true 时允许换行 (状态类长文案), 默认单行省略以防串行压盖
         private static TextMeshProUGUI CreateText(
             Transform parent, string name, string text, float size, Color color,
-            float x, float y, float w, float h)
+            float x, float y, float w, float h, bool wrap = false)
         {
             TextMeshProUGUI label = PeakWindowStyle.CreateText(
                 parent, name, text, size, color, TextAlignmentOptions.Left);
             NativeUiFactory.Place((RectTransform)label.transform, x, y, w, h);
+            label.textWrappingMode = wrap ? TextWrappingModes.Normal : TextWrappingModes.NoWrap;
+            label.overflowMode = wrap ? TextOverflowModes.Overflow : TextOverflowModes.Ellipsis;
             return label;
+        }
+
+        // 按文字实际宽度创建 pill, 并把 cursor 推进到下一个可用位置
+        private static Button CreateFitPill(
+            Transform parent, string name, string text, ref float cursor,
+            float y, float height, float fontSize)
+        {
+            float width = MeasurePillWidth(text, fontSize);
+            Button btn = PeakWindowStyle.CreatePill(parent, name, text, cursor, y, width, height, fontSize);
+            cursor += width;
+            return btn;
+        }
+
+        // 估算 pill 宽度: 中日韩字符按 1 个字宽算, 其余按 0.56 个字宽
+        private static float MeasurePillWidth(string text, float fontSize)
+        {
+            const float sidePadding = 26f;
+            float units = 0f;
+            if (!string.IsNullOrEmpty(text))
+            {
+                for (int i = 0; i < text.Length; i++)
+                {
+                    char c = text[i];
+                    bool wide = c >= 0x2E80 || (c >= 0xFF00 && c <= 0xFF60);
+                    units += wide ? 1f : 0.56f;
+                }
+            }
+            float textWidth = units * fontSize;
+            return Mathf.Clamp(textWidth + sidePadding * 2f, 96f, 340f);
         }
 
         // ===== 交互 =====
@@ -672,15 +731,31 @@ namespace PeakCSR
 
             PeakWindowStyle.CreateBackdrop(rootRt, "Backdrop");
 
-            const float w = 720f;
-            const float h = 300f;
+            const float w = 780f;
+            const float h = 400f;
             PeakWindowStyle.WindowParts win = PeakWindowStyle.CreateWindow(
                 rootRt, "PcsrPrompt", w, h, 74f, title, "");
+
+            // CreateWindow 的标题宽度只按 0.3w 分配, 中文长标题会挤成两行被裁掉;
+            // 这里直接重排标题文字区域, 让它占满标题栏可用宽度并强制单行
+            TextMeshProUGUI titleText = win.Title;
+            if (titleText != null)
+            {
+                RectTransform titleRt = titleText.transform as RectTransform;
+                if (titleRt != null)
+                {
+                    NativeUiFactory.Place(titleRt, 30f, 0f, w - 60f - 110f, 74f);
+                }
+                titleText.textWrappingMode = TextWrappingModes.NoWrap;
+                titleText.overflowMode = TextOverflowModes.Ellipsis;
+                titleText.alignment = TextAlignmentOptions.Left;
+            }
+
             PeakWindowStyle.CreateScrollingText(
                 win.Body, "Body", message, 21f, PeakWindowStyle.TextPrimary,
-                26f, 16f, w - 52f, h - 74f - 90f, 2f, 5f);
+                26f, 16f, w - 52f, h - 74f - 100f, 2f, 6f);
 
-            float btnW = 170f;
+            float btnW = 180f;
             float totalW = options.Length * btnW + (options.Length - 1) * 14f;
             float startX = (w - totalW) / 2f;
             for (int i = 0; i < options.Length; i++)
@@ -688,7 +763,7 @@ namespace PeakCSR
                 Option opt = options[i];
                 Button btn = PeakWindowStyle.CreatePill(
                     win.Body, "PromptBtn" + i, opt.Label,
-                    startX + i * (btnW + 14f), h - 74f - 74f, btnW, 44f, 19f);
+                    startX + i * (btnW + 14f), h - 74f - 88f, btnW, 46f, 19f);
                 if (opt.Callback != null)
                 {
                     Action cb = opt.Callback;

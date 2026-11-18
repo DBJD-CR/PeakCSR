@@ -14,8 +14,9 @@ namespace PeakCSR
     public static class CsrLoc
     {
         private static CsrLanguage _current = CsrLanguage.ZhCn;
-        // 是否自动跟随游戏原版语言; 玩家手动点过语言按钮后置为 false
-        private static bool _followVanilla = true;
+        // 是否跟随游戏原版语言切换事件; 启动时不能跟随,
+        // 因为游戏语言设置加载晚于 BepInEx 插件 Awake, 那一刻恒为默认 English
+        private static bool _followVanilla = false;
 
         private static readonly Dictionary<string, string> ZhStrings = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -59,6 +60,7 @@ namespace PeakCSR
             { "sign.queuing", "<color=#FF6B2B>PCSR 1v1</color>  <size=80%>• 匹配中...</size>" },
             { "sign.idle", "<color=#{0}>PCSR 1v1</color>  <size=82%>• {1} ELO</size>" },
             { "hud.btn.native", "原生窗口" },
+            { "win.opponent.placeholder", "等待中..." },
 
             { "tier.sherpa", "夏尔巴 (下界合金)" },
             { "tier.alpinist", "登山家 (钻石)" },
@@ -71,7 +73,7 @@ namespace PeakCSR
             { "format.hardcore.full", "高难天阶局 (天阶 {0})" },
             { "format.sprint.full", "单群系冲刺局 (天阶 {0})" },
 
-            { "status.ready", "准备就绪（选择赛制并点击开始匹配，或使用房间码约战）" },
+            { "status.ready", "准备就绪（选择赛制并开始匹配，或使用房间码约战）" },
             { "status.not_ready", "RaceService 尚未就绪，请先进入主菜单。" },
             { "status.searching", "正在搜索 [{0}] 1v1 排位房间..." },
             { "status.found_joining", "已找到 PCSR 1v1 房间 [{0}]，正在加入..." },
@@ -177,6 +179,7 @@ namespace PeakCSR
             { "sign.queuing", "<color=#FF6B2B>PCSR 1v1</color>  <size=80%>• QUEUING...</size>" },
             { "sign.idle", "<color=#{0}>PCSR 1v1</color>  <size=82%>• {1} ELO</size>" },
             { "hud.btn.native", "Native" },
+            { "win.opponent.placeholder", "Waiting..." },
 
             { "tier.sherpa", "SHERPA (Netherite)" },
             { "tier.alpinist", "ALPINIST (Diamond)" },
@@ -189,7 +192,7 @@ namespace PeakCSR
             { "format.hardcore.full", "Hardcore Peak (Ascent {0})" },
             { "format.sprint.full", "Biome Sprint (Ascent {0})" },
 
-            { "status.ready", "Ready (Select ruleset & Queue 1v1, or use Invite Code)" },
+            { "status.ready", "Ready - pick a ruleset and queue up" },
             { "status.not_ready", "RaceService not ready, enter Main Menu first." },
             { "status.searching", "Searching [{0}] 1v1 lobbies..." },
             { "status.found_joining", "Found PCSR 1v1 lobby [{0}], joining..." },
@@ -274,8 +277,6 @@ namespace PeakCSR
             try
             {
                 Loc.LanguageChanged += OnVanillaLanguageChanged;
-                // 启动时立刻对齐一次原版语言, 避免要等到玩家切换语言才生效
-                OnVanillaLanguageChanged();
             }
             catch
             {

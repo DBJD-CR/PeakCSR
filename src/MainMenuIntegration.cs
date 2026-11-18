@@ -9,7 +9,7 @@ using UnityEngine.UI;
 
 namespace PeakCSR
 {
-    // 在主菜单右侧 RANKED 路牌柱末尾原生追加一块 PCSR 1v1 木牌
+    // 在主菜单右侧 RANKED 路牌柱原生追加一块 PCSR 1v1 木牌
     // 注意: 必须挂 MainMenuMainPage.Start 的 Postfix 并用实例参数 __instance,
     // 直接 patch RANKED 的 SignpostPatch.Postfix 时 __instance 恒为 null 会静默失败
     [HarmonyPatch(typeof(MainMenuMainPage), "Start")]
@@ -26,8 +26,8 @@ namespace PeakCSR
         internal const float SignTailPadding = 22f;
         internal const float MinSignWidth = 190f;
         internal const float MaxSignWidth = 440f;
-        // SignY(5): 121 - 5*62 = -189, 组间距 -18, 工具区间距 -16 => -223
-        internal const float SignY = -223f;
+        // 放在柱子最顶部: 与 RANKED 表头木牌的 y=190 平齐, 直接占据最显眼位置
+        internal const float SignY = 190f;
 
         private static Button _signButton;
 
@@ -80,7 +80,8 @@ namespace PeakCSR
             GameObject clone = UnityEngine.Object.Instantiate(template.gameObject, buttonsParent);
             clone.name = SignName;
             clone.SetActive(true);
-            clone.transform.SetSiblingIndex(template.GetSiblingIndex() + 1);
+            // 置顶: 放在最上方, 让 PCSR 成为柱子上第一块木牌
+            clone.transform.SetAsFirstSibling();
 
             RectTransform rt = clone.GetComponent<RectTransform>();
             if (rt != null)
@@ -90,7 +91,8 @@ namespace PeakCSR
                 rt.pivot = new Vector2(0.5f, 0.5f);
                 rt.localScale = Vector3.one;
                 rt.sizeDelta = new Vector2(MaxSignWidth, SignHeight);
-                rt.anchoredPosition = new Vector2(SignEdgeX + SignTailOffset + MaxSignWidth / 2f, SignY);
+                // 顶部木牌不需要额外的尾部错位, 与表头同宽居中
+                rt.anchoredPosition = new Vector2(SignEdgeX + MaxSignWidth / 2f, SignY);
             }
 
             Button btn = clone.GetComponent<Button>();
@@ -202,7 +204,7 @@ namespace PeakCSR
 
             float width = Mathf.Clamp(SignHeadPadding + preferred + SignTailPadding, MinSignWidth, MaxSignWidth);
             rt.sizeDelta = new Vector2(width, rt.sizeDelta.y);
-            rt.anchoredPosition = new Vector2(SignEdgeX + SignTailOffset + width / 2f, SignY);
+            rt.anchoredPosition = new Vector2(SignEdgeX + width / 2f, SignY);
         }
 
         // 挂在 MainMenuMainPage 上, 负责等待 RANKED 木牌柱建好后注入并守护它不被隐藏
