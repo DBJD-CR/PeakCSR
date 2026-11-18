@@ -119,53 +119,59 @@ namespace PeakCSR
                 if (!File.Exists(SavePath))
                 {
                     Save();
-                    HookVanillaRatingSeed();
-                    return;
                 }
-
-                string json = File.ReadAllText(SavePath);
-                int elo = ReadInt(json, "elo", defaultElo);
-                int peak = ReadInt(json, "peakElo", elo);
-                int seed = ReadInt(json, "seedElo", elo);
-                int seededFlag = ReadInt(json, "seededFromVanilla", 0);
-                int wins = ReadInt(json, "wins", 0);
-                int losses = ReadInt(json, "losses", 0);
-                int draws = ReadInt(json, "draws", 0);
-                int streak = ReadInt(json, "streak", 0);
-                string sig = ReadString(json, "sig");
-
-                string expectedSig = ComputeSignature(elo, peak, wins, losses, draws);
-                if (!string.IsNullOrEmpty(sig) && !string.Equals(sig, expectedSig, StringComparison.OrdinalIgnoreCase))
+                else
                 {
-                    Plugin.Log.LogWarning("[PeakCSR] 检测到本地 ELO 存档签名校验不一致，已重置为初始分数。");
-                    _currentElo = defaultElo;
-                    _peakElo = defaultElo;
-                    _seedElo = defaultElo;
-                    _seededFromVanilla = false;
-                    _wins = 0;
-                    _losses = 0;
-                    _draws = 0;
-                    _streak = 0;
-                    Save();
-                    HookVanillaRatingSeed();
-                    return;
+                    LoadFromJson(defaultElo);
                 }
-
-                _currentElo = Mathf.Clamp(elo, 100, 5000);
-                _peakElo = Mathf.Max(_currentElo, peak);
-                _seedElo = Mathf.Clamp(seed, MinSeedElo, MaxSeedElo);
-                _seededFromVanilla = seededFlag != 0;
-                _wins = Mathf.Max(0, wins);
-                _losses = Mathf.Max(0, losses);
-                _draws = Mathf.Max(0, draws);
-                _streak = streak;
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning("[PeakCSR] 读取本地 ELO 存档失败，使用默认分数: " + ex.Message);
             }
 
+            // 无论走哪条分支, 种子分继承的订阅都在这里统一挂载一次
             HookVanillaRatingSeed();
+        }
+
+        // 解析存档并校验签名, 签名不一致时回落到初始分数并覆盖写回
+        private static void LoadFromJson(int defaultElo)
+        {
+            string json = File.ReadAllText(SavePath);
+            int elo = ReadInt(json, "elo", defaultElo);
+            int peak = ReadInt(json, "peakElo", elo);
+            int seed = ReadInt(json, "seedElo", elo);
+            int seededFlag = ReadInt(json, "seededFromVanilla", 0);
+            int wins = ReadInt(json, "wins", 0);
+            int losses = ReadInt(json, "losses", 0);
+            int draws = ReadInt(json, "draws", 0);
+            int streak = ReadInt(json, "streak", 0);
+            string sig = ReadString(json, "sig");
+
+            string expectedSig = ComputeSignature(elo, peak, wins, losses, draws);
+            if (!string.IsNullOrEmpty(sig) && !string.Equals(sig, expectedSig, StringComparison.OrdinalIgnoreCase))
+            {
+                Plugin.Log.LogWarning("[PeakCSR] 检测到本地 ELO 存档签名校验不一致，已重置为初始分数。");
+                _currentElo = defaultElo;
+                _peakElo = defaultElo;
+                _seedElo = defaultElo;
+                _seededFromVanilla = false;
+                _wins = 0;
+                _losses = 0;
+                _draws = 0;
+                _streak = 0;
+                Save();
+                return;
+            }
+
+            _currentElo = Mathf.Clamp(elo, 100, 5000);
+            _peakElo = Mathf.Max(_currentElo, peak);
+            _seedElo = Mathf.Clamp(seed, MinSeedElo, MaxSeedElo);
+            _seededFromVanilla = seededFlag != 0;
+            _wins = Mathf.Max(0, wins);
+            _losses = Mathf.Max(0, losses);
+            _draws = Mathf.Max(0, draws);
+            _streak = streak;
         }
 
         private static void HookVanillaRatingSeed()
@@ -269,7 +275,7 @@ namespace PeakCSR
             double modeMult = GetModeMultiplier(format, ascent);
             double totalWeight = antiBoostWeight * modeMult;
 
-            // 全图默认基准 K=36（平局分差下胜一场约 +18 分；单群系 0.25x 约 +4~5 分；高难天阶最高可达 +29 分）
+            // 全图默认基准 K=36（平局分差下胜一场约 +18 分；单群系 0.22x 约 +3~5 分；高难天阶最高可达 +29 分）
             int totalGames = _wins + _losses + _draws;
             int baseK = totalGames < 10 ? 40 : (_currentElo >= 1650 ? 28 : 36);
 

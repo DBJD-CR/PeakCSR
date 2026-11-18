@@ -211,7 +211,12 @@ namespace PeakCSR
             int mySeedElo = Mathf.Clamp(EloCalculator.SeedElo, EloCalculator.MinSeedElo, EloCalculator.MaxSeedElo);
             int oppSeedElo = Mathf.Clamp(opponentElo, EloCalculator.MinSeedElo, EloCalculator.MaxSeedElo);
 
-            string rawSigStr = cleanCode + "|" + mySteamId + "|" + opponentSteamId + "|" + winnerSteamId + "|" + seed + "|" + ascent + "|" + format + "|" + SharedCloudSalt;
+            // 种子分必须纳入签名, 否则可被篡改用于抬高首次建档基数
+            // 顺序必须与 worker.js 的 v2 签名逻辑完全一致
+            string rawSigStr = cleanCode + "|" + mySteamId + "|" + opponentSteamId + "|" + winnerSteamId
+                + "|" + seed + "|" + ascent + "|" + format
+                + "|" + mySeedElo + "|" + oppSeedElo
+                + "|" + SharedCloudSalt;
             string sig = ComputeSha256Hex16(rawSigStr);
 
             JObject payload = new JObject

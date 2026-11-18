@@ -112,8 +112,9 @@ async function handleMatchReport(body, env, corsHeaders) {
     return jsonResp({ ok: false, error: "Invalid match parameters" }, 400, corsHeaders);
   }
 
-  // 校验客户端 SHA-256 签名
-  const rawSigStr = `${inviteCode}|${reporterId}|${opponentId}|${winnerId}|${seed}|${ascent}|${format}|${SHARED_SALT}`;
+  // 校验客户端 SHA-256 签名 (含双方种子分, 防止篡改首次建档基数)
+  // 字段顺序必须与 src/CloudLeaderboardService.cs 的 rawSigStr 完全一致
+  const rawSigStr = `${inviteCode}|${reporterId}|${opponentId}|${winnerId}|${seed}|${ascent}|${format}|${reporterSeedElo}|${opponentSeedElo}|${SHARED_SALT}`;
   const expectedSig = await sha256Hex16(rawSigStr);
   if (signature !== expectedSig) {
     return jsonResp({ ok: false, error: "Signature verification failed" }, 403, corsHeaders);
