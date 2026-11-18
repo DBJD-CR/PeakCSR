@@ -157,6 +157,20 @@ namespace PeakCSR
             return autoEndMs >= BaseCsrAutoEndMagicMs && autoEndMs <= BaseCsrAutoEndMagicMs + 40;
         }
 
+        // 本机环境指纹: RANKED 服务端按 gameVersion + mapSetHash 校验房间兼容性,
+        // 两者任一不同都会直接拒绝加入 (并给出误导性的 "version mismatch" 提示)
+        public static string GetEnvironmentGameVersion()
+        {
+            try { return MapCatalog.GameVersion ?? ""; }
+            catch { return ""; }
+        }
+
+        public static string GetEnvironmentMapSetHash()
+        {
+            try { return MapCatalog.MapSetHash ?? ""; }
+            catch { return ""; }
+        }
+
         public string GetCurrentFormatDisplayName()
         {
             return GetFormatDisplayName(_selectedFormat, SelectedAscent);
@@ -331,6 +345,9 @@ namespace PeakCSR
             // 轮询期间可能已经进入房间或退出队列, 此时不应再动状态机
             if (_state != CsMatchState.SearchingLobby) return;
 
+            // 记录本次轮询里是否看到过"是 PCSR 房但环境不兼容"的候选, 用于给出准确提示
+            bool sawIncompatibleCsrLobby = false;
+
             if (entries != null)
             {
                 for (int i = 0; i < entries.Count; i++)
@@ -342,9 +359,21 @@ namespace PeakCSR
                     Plugin.Log.LogInfo("[PeakCSR] 大厅候选 [" + item.InviteCode + "] 状态=" + item.Status
                         + " 玩家=" + item.Players + "/" + item.MaxPlayers
                         + " 天阶=" + item.Ascent + " 路线=" + item.Route
-                        + " autoEnd=" + item.AutoEndMs
+                        + " autoEnd=" + item.AutoEndMs + " 版本=" + item.GameVersion
                         + " 复活=" + item.ReviveDead + " 幽灵=" + item.GhostsVisible
                         + " 盲种=" + item.SecretSeed + " 兼容=" + item.Compatible);
+
+                    if (!item.Compatible)
+                    {
+                        // 服务端已按 gameVersion/mapSetHash 判定与本机环境不符, 这类房间永远进不去。
+                        // 只有"赛制也完全一致"的 PCSR 房才计入, 其它赛制的不参与判断
+                        if (IsPeakCsrMagicMs(item.AutoEndMs)
+                            && item.AutoEndMs == GetMagicAutoEndMs(_selectedFormat, SelectedAscent))
+                        {
+                            sawIncompatibleCsrLobby = true;
+                        }
+                        continue;
+                    }
 
                     if (!IsMatchingLobby(item)) continue;
 
@@ -354,6 +383,21 @@ namespace PeakCSR
                     RaceService.Instance.JoinRace(item.InviteCode, OnRaceJoined, OnLobbyError);
                     return;
                 }
+            }
+
+            // 注意: 走到这里说明本轮没有任何可成功加入的房间。
+            // 此时若恰好存在"同赛制但因地图集不同进不去"的房间, 才提示环境不一致;
+            // 只要有任何一间能正常加入, 上面就已经 return 了, 不会覆盖正常匹配体验。
+            if (sawIncompatibleCsrLobby)
+            {
+                _statusMessage = CsrLoc.T("status.env_mismatch",
+                    GetEnvironmentGameVersion(), GetEnvironmentMapSetHash());
+                Plugin.Log.LogWarning("[PeakCSR] 检测到同赛制 PCSR 房间但地图集不一致, 本机 mapSetHash="
+                    + GetEnvironmentMapSetHash() + ", gameVersion=" + GetEnvironmentGameVersion());
+                NotifyStateChanged();
+                // 保持轮询节奏, 对手修正环境或离开后能自动恢复
+                _nextLobbyPollTime = Time.realtimeSinceStartup + LobbyPollIntervalSeconds;
+                return;
             }
 
             Plugin.Log.LogInfo("[PeakCSR] 当前没有符合赛制的大厅，创建新的 PCSR 1v1 房间。");
@@ -652,11 +696,26 @@ namespace PeakCSR
             _isSwitchingRerollRoom = false;
             _lobbyFetchInFlight = false;
 
+            // RANKED 服务端在 gameVersion / mapSetHash 不一致时统一报 "Game version mismatch",
+            // 且文案里两个版本号往往一模一样, 真正原因是地图集哈希不同
+            bool envMismatch = IsEnvironmentMismatchError(err);
+            if (envMismatch)
+            {
+                _statusMessage = CsrLoc.T("status.env_mismatch",
+                    GetEnvironmentGameVersion(), GetEnvironmentMapSetHash());
+                Plugin.Log.LogWarning("[PeakCSR] 房间环境不一致 (地图集/版本), 本机 mapSetHash="
+                    + GetEnvironmentMapSetHash() + ", gameVersion=" + GetEnvironmentGameVersion() + " | " + err);
+                _state = CsMatchState.Idle;
+                NotifyStateChanged();
+                return;
+            }
+
             // 排队期间的偶发网络错误不应中断轮询, 只更新提示文案
             if (_state == CsMatchState.SearchingLobby)
             {
                 _statusMessage = CsrLoc.T("status.error", err);
                 Plugin.Log.LogWarning("[PeakCSR] 大厅轮询失败, 稍后重试: " + err);
+                _nextLobbyPollTime = Time.realtimeSinceStartup + LobbyPollIntervalSeconds;
                 NotifyStateChanged();
                 return;
             }
@@ -665,6 +724,14 @@ namespace PeakCSR
             _statusMessage = CsrLoc.T("status.error", err);
             Plugin.Log.LogWarning("[PeakCSR] 匹配服务异常: " + err);
             NotifyStateChanged();
+        }
+
+        // 识别服务端的环境不兼容错误 (版本 / 地图集)
+        private static bool IsEnvironmentMismatchError(string err)
+        {
+            if (string.IsNullOrEmpty(err)) return false;
+            return err.IndexOf("version mismatch", StringComparison.OrdinalIgnoreCase) >= 0
+                || err.IndexOf("mapSetHash", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void OnLiveChatReceived(ChatEntry entry)

@@ -50,6 +50,9 @@ namespace PeakCSR
         private Button _btnReroll;
         private Button _btnForfeit;
 
+        // 本机环境指纹 (游戏版本 + 地图集哈希), 用于排查无法联机的问题
+        private TextMeshProUGUI _lblEnv;
+
         // 全服天梯
         private TextMeshProUGUI _lblBoardMeta;
         private Button _btnRefreshBoard;
@@ -317,10 +320,14 @@ namespace PeakCSR
 
             // 状态文案允许两行, 其余字段统一单行不换行
             _lblStatus = CreateText(box, "LblStatus", "", 20f, PeakWindowStyle.TextPrimary, BoxPad, 58f, inner, 56f, wrap: true);
-            _lblRoom = CreateText(box, "LblRoom", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 122f, inner, 26f);
-            _lblOpponent = CreateText(box, "LblOpponent", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 152f, inner, 26f);
-            _lblProgress = CreateText(box, "LblProgress", "", 19f, PeakWindowStyle.TextPrimary, BoxPad, 182f, inner, 26f);
-            _lblVitals = CreateText(box, "LblVitals", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 212f, inner, 26f);
+
+            // RANKED 服务端按 版本 + 地图集哈希 校验房间, 双方不一致会直接拒绝加入,
+            // 把指纹显示出来, 联机失败时可以直接和对手比对
+            _lblEnv = CreateText(box, "LblEnv", "", 16f, PeakWindowStyle.TextMuted, BoxPad, 118f, inner, 22f);
+            _lblRoom = CreateText(box, "LblRoom", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 146f, inner, 26f);
+            _lblOpponent = CreateText(box, "LblOpponent", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 174f, inner, 26f);
+            _lblProgress = CreateText(box, "LblProgress", "", 19f, PeakWindowStyle.TextPrimary, BoxPad, 202f, inner, 26f);
+            _lblVitals = CreateText(box, "LblVitals", "", 19f, PeakWindowStyle.TextMuted, BoxPad, 230f, inner, 26f);
 
             // 操作按钮分两行摆放, 换图文案较长时也不会互相压盖
             _btnAction = PeakWindowStyle.CreatePill(box, "BtnAction", CsrLoc.T("hud.btn.queue"), BoxPad, 252f, 300f, 42f, 19f);
@@ -580,6 +587,14 @@ namespace PeakCSR
             Safe(() =>
             {
                 if (_lblStatus != null) _lblStatus.text = CsrLoc.T("hud.status", Mc.StatusMessage);
+            });
+
+            Safe(() =>
+            {
+                if (_lblEnv == null) return;
+                _lblEnv.text = CsrLoc.T("win.lbl.env",
+                    MatchController.GetEnvironmentGameVersion(),
+                    MatchController.GetEnvironmentMapSetHash());
             });
 
             Safe(() =>
