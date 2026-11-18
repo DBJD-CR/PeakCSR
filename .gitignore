@@ -1,0 +1,22 @@
+# 构建产物
+bin/
+obj/
+*.user
+*.suo
+
+# IDE
+.vs/
+.idea/
+*.csproj.user
+
+# 本地敏感配置 (Cloudflare Token 等绝对不要提交)
+cloudflare/.wrangler/
+cloudflare/node_modules/
+wrangler.toml
+*.secret
+secrets.json
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store
