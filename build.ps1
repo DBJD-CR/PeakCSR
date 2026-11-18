@@ -6,7 +6,19 @@ $ProfileRoot = "C:\Users\ASUS\AppData\Roaming\Thunderstore Mod Manager\DataFolde
 # 作者名改为个人 (Thunderstore 显示为 "PeakCSR vX by DBJD-CR")
 $AuthorName  = "DBJD-CR"
 $PackageName = "$AuthorName-PeakCSR"
-$Version     = "0.2.1"
+
+# 版本号以 manifest.json 为唯一真相源, 避免多处硬编码不一致
+$manifestPath = Join-Path $ProjectRoot "manifest.json"
+$manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+$Version = [string]$manifest.version_number
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    throw "manifest.json 缺少 version_number 字段"
+}
+$parts = $Version.Split('.')
+$VerMajor = [int]$parts[0]
+$VerMinor = [int]$parts[1]
+$VerPatch = if ($parts.Length -gt 2) { [int]$parts[2] } else { 0 }
+Write-Host "[PeakCSR] 目标版本 (来自 manifest.json): $Version" -ForegroundColor Cyan
 
 $LegacyDirs  = @(
     (Join-Path $ProfileRoot "BepInEx\plugins\PeakCSR"),
@@ -70,13 +82,44 @@ Remove-Item $tempPack -Recurse -Force
 $modsYmlPath = Join-Path $ProfileRoot "mods.yml"
 if (Test-Path $modsYmlPath) {
     $modsContent = Get-Content -Path $modsYmlPath -Raw
+
+    # 旧组织名条目: 先整体改名为个人条目, 后续统一同步字段
     if ($modsContent -match "name:\s*PancakesLabs-PeakCSR") {
         $modsContent = $modsContent -replace "(?m)^(\s*)name:\s*PancakesLabs-PeakCSR", "`$1name: $PackageName"
         $modsContent = $modsContent -replace "(?m)^(\s*)authorName:\s*PancakesLabs", "`$1authorName: $AuthorName"
-        Set-Content -Path $modsYmlPath -Value $modsContent -Encoding UTF8
-        Write-Host "[PeakCSR] mods.yml migrated: author -> $AuthorName" -ForegroundColor Yellow
+        Write-Host "[PeakCSR] mods.yml 旧条目已更名为 $PackageName" -ForegroundColor Yellow
     }
-    elseif ($modsContent -notmatch "name:\s*$([regex]::Escape($PackageName))") {
+
+    if ($modsContent -match "name:\s*$([regex]::Escape($PackageName))") {
+        # 已存在条目: 就地同步 authorName / websiteUrl / versionNumber 三行
+        $lines = $modsContent -split "`r?`n"
+        $entryStart = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "name:\s*$([regex]::Escape($PackageName))\s*$") { $entryStart = $i; break }
+        }
+        if ($entryStart -ge 0) {
+            # 找到本条目内的 versionNumber 段并重写数字
+            $verIdx = -1
+            for ($i = $entryStart; $i -lt [Math]::Min($entryStart + 40, $lines.Count); $i++) {
+                if ($lines[$i] -match "^\s*versionNumber:\s*$") { $verIdx = $i; break }
+            }
+            if ($verIdx -ge 0) {
+                for ($k = $verIdx + 1; $k -lt [Math]::Min($verIdx + 4, $lines.Count); $k++) {
+                    if ($lines[$k] -match "^(\s*)major:\s*\d+")     { $lines[$k] = "$($Matches[1])major: $VerMajor" }
+                    elseif ($lines[$k] -match "^(\s*)minor:\s*\d+") { $lines[$k] = "$($Matches[1])minor: $VerMinor" }
+                    elseif ($lines[$k] -match "^(\s*)patch:\s*\d+") { $lines[$k] = "$($Matches[1])patch: $VerPatch" }
+                }
+            }
+            # 顺带修正作者名与仓库地址
+            for ($i = $entryStart; $i -lt [Math]::Min($entryStart + 40, $lines.Count); $i++) {
+                if ($lines[$i] -match "^(\s*)authorName:")  { $lines[$i] = "$($Matches[1])authorName: $AuthorName" }
+                if ($lines[$i] -match "^(\s*)websiteUrl:")  { $lines[$i] = "$($Matches[1])websiteUrl: https://github.com/$AuthorName/PeakCSR" }
+            }
+            Set-Content -Path $modsYmlPath -Value ($lines -join "`r`n") -Encoding UTF8
+            Write-Host "[PeakCSR] mods.yml 已同步: author=$AuthorName, version=$Version" -ForegroundColor Yellow
+        }
+    }
+    else {
         $entry = @"
 - manifestVersion: 1
   name: $PackageName
