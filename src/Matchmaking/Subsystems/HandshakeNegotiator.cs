@@ -39,7 +39,10 @@ namespace PeakCSR
                 bool connReady = _gw.LiveConnected;
                 bool stableInRoom = session.OpponentJoinedTime > 0f && Time.realtimeSinceStartup - session.OpponentJoinedTime > 3f;
                 bool oppIdle = IsOpponentStillJoined(_gw);
-                bool graceExpired = session.OpponentJoinedTime > 0f && Time.realtimeSinceStartup - session.OpponentJoinedTime > MatchSession.HandshakeGraceSeconds;
+                // 宽限期从 socket 真正可用的时刻起算
+                bool graceExpired = connReady
+                    && session.LiveConnectedSince > 0f
+                    && Time.realtimeSinceStartup - session.LiveConnectedSince > MatchSession.HandshakeGraceSeconds;
                 if (connReady && stableInRoom && oppIdle && graceExpired)
                 {
                     PcsrLog.LogInfo("[PeakCSR] 握手超时 " + MatchSession.HandshakeGraceSeconds + "s，移出未安装 PeakCSR 的误入玩家: " + session.OpponentName);

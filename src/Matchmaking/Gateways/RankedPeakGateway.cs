@@ -77,6 +77,32 @@ namespace PeakCSR
             }
         }
 
+        // AutoEndMs 是服务端下发的"该局结束后多少毫秒自动收房",
+        // PCSR 房间用 RoomMagicCodec 编码过赛制, 但原始毫秒值仍可从 CurrentRace 读到。
+        public int AutoEndSecondsApprox
+        {
+            get
+            {
+                try
+                {
+                    RaceInfo race = CurrentRace;
+                    if (race == null) return 30;
+                    int ms = race.AutoEndMs;
+                    if (ms <= 0) return 30;
+                    // 编码过的魔数不是真实毫秒, 统一按默认 30 秒播报
+                    if (RoomMagicCodec.IsCsrMagicMs(ms)) return 30;
+                    int seconds = (int)System.Math.Round(ms / 1000.0);
+                    if (seconds < 1) seconds = 1;
+                    if (seconds > 120) seconds = 120;
+                    return seconds;
+                }
+                catch
+                {
+                    return 30;
+                }
+            }
+        }
+
         public RaceParticipant Self
         {
             get
@@ -279,6 +305,39 @@ namespace PeakCSR
             try { return MapCatalog.SegmentBiomeName(levelIndex, segmentIndex) ?? ""; } catch { return ""; }
         }
 
+        // 查询"群系出现序号 ordinal 对应的进度点区间"。
+        public bool TryGetBiomePointSpan(int biomeOrdinal, out int startIndex, out int count)
+        {
+            startIndex = 0;
+            count = 0;
+            try
+            {
+                MountainProgressHandler handler = MountainProgressHandler.Instance;
+                if (handler == null || handler.progressPoints == null) return false;
+
+                ProgressPointEx[] pts = ProgressPointEx.From(handler.progressPoints);
+                if (pts.Length == 0) return false;
+
+                // 尾部 NADIR 之类辅助点不参与区间计算
+                int last = pts.Length - 1;
+                while (last > 0 && pts[last].IsNadir) last--;
+                if (last < 0) return false;
+
+                for (int i = 0; i <= last; i++)
+                {
+                    if (pts[i].BiomeOrdinal != biomeOrdinal) continue;
+                    if (count == 0) startIndex = i;
+                    count++;
+                }
+                return count > 0;
+            }
+            catch (Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 查询群系进度点区间失败: " + ex.Message);
+                return false;
+            }
+        }
+
         // 随机挑选一个非重复的真实地图槽位, 全部失败则回退当前槽位
         public int PickRandomAuthenticLevel(int excludeIndex)
         {
@@ -297,7 +356,7 @@ namespace PeakCSR
                 }
                 catch
                 {
-                    return candidate;
+                    // 校验抛异常时这一格的真实性无法确认, 直接跳过继续采样
                 }
             }
             try { return MapCatalog.CurrentLevelIndex; } catch { return excludeIndex < 0 ? 0 : excludeIndex; }
