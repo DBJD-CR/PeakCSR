@@ -86,6 +86,9 @@ namespace PeakCSR
             // 结算上报通道: 协调器必须持有天梯服务引用, 否则战报永远不会提交
             _coordinator.Ladder = ladder;
 
+            // 收尾服务: 回主菜单的唯一实现, 战报按钮与 30s 关房都走它
+            MatchTeardownService.Initialize();
+
             // UI 宿主 (旧 IMGUI PeakCsrHud 已删除, F10 热键统一在本组件 Update 处理)
             go.AddComponent<PcsrMenuWindow>();
             go.AddComponent<PostMatchReportView>();

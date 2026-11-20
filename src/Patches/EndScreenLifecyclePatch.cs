@@ -25,9 +25,11 @@ namespace PeakCSR
                 }
                 if (__instance != null)
                 {
-                    // 返回机场即结算画面关闭: 派发领域事件, UI 借此弹出赛后战报
+                    // 结算画面关闭: 派发领域事件 (仍保留给其它订阅者)
                     EventBus.PublishEndScreenClosed();
-                    __instance.ReturnToAirport();
+                    // PCSR 对局统一回主菜单, 不再回机场
+                    MatchTeardownService.EnsureInitialized();
+                    MatchTeardownService.ReturnToMainMenu(false);
                     return false;
                 }
             }
