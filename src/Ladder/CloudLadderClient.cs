@@ -381,15 +381,23 @@ namespace PeakCSR
                     yield break;
                 }
                 List<CsrHistoryEntry> list = new List<CsrHistoryEntry>();
+                bool parsed = false;
                 try
                 {
                     JObject root = JObject.Parse(req.downloadHandler.text);
                     JArray arr = root["history"] as JArray;
+                    parsed = arr != null;
                     if (arr != null)
                     {
                         for (int i = 0; i < arr.Count; i++)
                         {
                             JToken item = arr[i];
+                            // 非对象元素说明响应已经不可信, 不能再把"读到一半的列表"当成完整历史发布出去
+                            if (item == null || item.Type != JTokenType.Object)
+                            {
+                                parsed = false;
+                                break;
+                            }
                             CsrHistoryEntry e = new CsrHistoryEntry
                             {
                                 MatchKey = Str(item, "matchKey"),
@@ -418,14 +426,16 @@ namespace PeakCSR
                 catch (Exception ex)
                 {
                     PcsrLog.LogWarning("[PeakCSR] 解析历史战绩失败: " + ex.Message);
+                    parsed = false;
                 }
-                if (onDone != null) onDone(list);
+                // 解析失败返回 null (保留调用方缓存); 合法的空数组仍然返回空列表 (清空面板)
+                if (onDone != null) onDone(parsed ? list : null);
             }
         }
 
-        // nickname 传 null 表示本次不改昵称(用云端已有值), 传 "" 表示清空回退到 Steam 昵称
+        // keepNickname = true 时云端完全不碰昵称字段 (昵称编辑器的那条 "" 才是真正的清空)
         public IEnumerator PushProfile(
-            int favoriteMap, int favoriteAscent, int favoriteFormat, string nickname,
+            int favoriteMap, int favoriteAscent, int favoriteFormat, string nickname, bool keepNickname,
             Action<bool, string> onDone)
         {
             string steamId = SteamIdentity.GetSteamId64();
@@ -435,9 +445,9 @@ namespace PeakCSR
                 yield break;
             }
 
-            // 签名顺序必须与 worker.js 的 handleProfileUpdate 完全一致
+            // 签名顺序必须与 Worker 的 handleProfileUpdate 完全一致
             string rawSigStr = steamId + "|" + favoriteMap + "|" + favoriteAscent + "|" + favoriteFormat
-                + "|" + nickname + "|" + SharedCloudSalt;
+                + "|" + nickname + "|" + (keepNickname ? 1 : 0) + "|" + SharedCloudSalt;
             string sig = ComputeSha256Hex16(rawSigStr);
 
             JObject payload = new JObject
@@ -448,6 +458,7 @@ namespace PeakCSR
                 // 否则新建档会被写死成 1000, 再回灌就把本地继承来的基础分覆盖掉了
                 ["seedElo"] = Mathf.Clamp(PlayerProfileSeed(), EloEngine.MinSeedElo, EloEngine.MaxSeedElo),
                 ["nickname"] = nickname ?? "",
+                ["keepNickname"] = keepNickname,
                 ["favoriteMap"] = favoriteMap,
                 ["favoriteAscent"] = favoriteAscent,
                 ["favoriteFormat"] = favoriteFormat,
@@ -473,13 +484,26 @@ namespace PeakCSR
             if (onDone != null) onDone(false, errCode);
         }
 
-        // 战报双次重试上报: 第一次立即上报, 若对方还没上报且原版后端状态还在落地,
-        // 3 秒后自动二次确认触发结算 (重试节奏与旧版一致)
+        // 上报重试节奏 (秒)，这里改成覆盖 40 秒的阶梯重试, 让双方上报一定能撞上
+        private static readonly float[] ReportRetryDelays = { 0f, 3f, 8f, 15f, 25f, 38f };
+
         public IEnumerator ReportMatch(
             string inviteCode, string opponentSteamId, string opponentName, int opponentElo,
             string winnerSteamId, int seed, int levelIndex, int ascent, McsrRuleFormat format, int route,
             long durationMs, float myProgress01, float oppProgress01, bool isVoid, string voidReason,
             Action<ReportResult> onSettled)
+        {
+            return ReportMatch(inviteCode, opponentSteamId, opponentName, opponentElo, winnerSteamId,
+                seed, levelIndex, ascent, format, route, durationMs, myProgress01, oppProgress01,
+                isVoid, voidReason, onSettled, true);
+        }
+
+        // singleShot = true: 只请求一次, 由外部队列控制重投节奏
+        public IEnumerator ReportMatch(
+            string inviteCode, string opponentSteamId, string opponentName, int opponentElo,
+            string winnerSteamId, int seed, int levelIndex, int ascent, McsrRuleFormat format, int route,
+            long durationMs, float myProgress01, float oppProgress01, bool isVoid, string voidReason,
+            Action<ReportResult> onSettled, bool useRetryLadder)
         {
             string mySteamId = SteamIdentity.GetSteamId64();
             string myName = PlayerNameSanitizer.Current();
@@ -520,25 +544,73 @@ namespace PeakCSR
                 ["signature"] = sig
             };
 
-            for (int attempt = 0; attempt < 2; attempt++)
+            int attempts = useRetryLadder ? ReportRetryDelays.Length : 1;
+            ReportResult lastResult = null;
+            for (int attempt = 0; attempt < attempts; attempt++)
             {
-                if (attempt > 0) yield return new WaitForSecondsRealtime(3.0f);
+                float delay = ReportRetryDelays[attempt];
+                if (useRetryLadder && delay > 0f) yield return new WaitForSecondsRealtime(delay);
 
                 ReportResult result = null;
+                string lastError = null;
                 yield return PostJson(BaseUrl() + "/api/report", payload, delegate(bool success, string body, string error)
                 {
                     if (success)
                     {
                         result = ParseReportResponse(body);
+                        if (result == null)
+                        {
+                            // 解析失败也要留痕, 否则线上只看到"没结算"却不知道为什么
+                            string raw = body ?? "";
+                            lastError = "unparsable response: " + raw.Substring(0, System.Math.Min(160, raw.Length));
+                        }
+                    }
+                    else
+                    {
+                        lastError = error;
                     }
                 });
 
                 if (result != null && result.Settled)
                 {
+                    PcsrLog.LogInfo("[PeakCSR] 战报上报成功 (第 " + (attempt + 1) + " 次, "
+                        + result.VerifyMethod + "): ELO " + result.AuthElo);
                     if (onSettled != null) onSettled(result);
                     yield break;
                 }
+
+                // 服务器给过可解析响应 (待对手/待上游) 就记住, 之后用来区分"等对手"与"根本打不通"
+                if (result != null) lastResult = result;
+
+                PcsrLog.LogInfo("[PeakCSR] 战报第 " + (attempt + 1) + "/" + attempts
+                    + " 次上报未结算 (等待对手上报或上游核验)"
+                    + (lastError != null ? "，错误: " + lastError : "")
+                    + "，将在后续重试。");
             }
+
+            // 只有"首次完整阶梯"才入队; 队列自己的单次重投失败了由队列自己安排下次
+            if (useRetryLadder)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 战报重试窗口内始终未结算，已登记为待补传 (房间 " + inviteCode + ", 种子 " + seed + ")。");
+                LadderSyncService sync = LadderSyncService.Instance;
+                if (sync != null)
+                {
+                    sync.EnqueuePendingReport(inviteCode, opponentSteamId, opponentName, opponentElo, winnerSteamId,
+                        seed, levelIndex, ascent, format, route, durationMs, myProgress01, oppProgress01, isVoid, voidReason);
+                }
+            }
+
+            if (lastResult != null)
+            {
+                // 云端已受理, 只是还没结算
+                if (onSettled != null) onSettled(lastResult);
+                yield break;
+            }
+            // 一次可用响应都没拿到: 明确回一个"投递失败", 让界面显示真实状态而不是"待结算"
+            ReportResult failed = new ReportResult();
+            failed.Failed = true;
+            failed.VerifyMethod = "report_failed";
+            if (onSettled != null) onSettled(failed);
         }
 
         public sealed class ReportResult
@@ -547,6 +619,8 @@ namespace PeakCSR
             public bool IsVoid;
             public int AuthElo;
             public string VerifyMethod = "cloud";
+            // 服务器根本没有给出可用响应 (网络失败/无法解析): 与"已受理但等对手"必须区分开
+            public bool Failed;
         }
 
         private static ReportResult ParseReportResponse(string body)

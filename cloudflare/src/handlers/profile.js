@@ -45,9 +45,11 @@ export async function handleProfileUpdate(body, env) {
 
   // 昵称走白名单过滤, 空串表示"沿用 Steam 昵称"
   const nickname = sanitizeNickname(body.nickname);
+  // keepNickname: 客户端只想改自选偏好, 明确要求不要碰昵称
+  const keepNickname = body.keepNickname === true || body.keepNickname === 1 || body.keepNickname === "1";
 
   // 签名顺序必须与 src/Ladder/CloudLadderClient.cs 的 PushProfile 完全一致
-  const rawSigStr = `${steamId}|${favoriteMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${SHARED_SALT}`;
+  const rawSigStr = `${steamId}|${favoriteMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${keepNickname ? 1 : 0}|${SHARED_SALT}`;
   const expectedSig = await sha256Hex16(rawSigStr);
   if (signature !== expectedSig) {
     return jsonResp({ ok: false, error: "Signature verification failed" }, 403);
@@ -70,7 +72,8 @@ export async function handleProfileUpdate(body, env) {
 
   const currentNick = player.nickname || "";
   let nickChanged = false;
-  if (nickname !== currentNick) {
+  // keepNickname 时整段跳过昵称处理
+  if (!keepNickname && nickname !== currentNick) {
     if (nickname !== "") {
       // 冷却只约束"改成新昵称": 首次命名或改名后 24h 内不能再次改名
       const lastChange = player.nickname_updated_at || 0;

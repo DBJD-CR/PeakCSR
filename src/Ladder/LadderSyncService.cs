@@ -33,6 +33,36 @@ namespace PeakCSR
 
         public static LadderSyncService Instance { get; private set; }
 
+        // 待补传战报 (上报重试窗口内没结算成功的局)
+        // 关键点: 上报失败绝不能只写个 Pending 状态就完事，
+        // 这里先落本地队列, 之后由 Start / 结算后 / 打开面板三条路径驱动重投。
+        private sealed class PendingReport
+        {
+            public string InviteCode;
+            public string OpponentSteamId;
+            public string OpponentName;
+            public int OpponentElo;
+            public string WinnerSteamId;
+            public int Seed;
+            public int LevelIndex;
+            public int Ascent;
+            public McsrRuleFormat Format;
+            public int Route;
+            public long DurationMs;
+            public float MyProgress;
+            public float OppProgress;
+            public bool IsVoid;
+            public string VoidReason;
+            public int Attempts;
+            public float NextAttemptAt;
+        }
+
+        // 单局补传上限: 超过后放弃, 避免无限重投打爆 Worker 配额
+        private const int MaxPendingAttempts = 12;
+        private const float PendingRetryIntervalSeconds = 45f;
+        private readonly List<PendingReport> _pendingReports = new List<PendingReport>();
+        private bool _pendingDrainRunning;
+
         private CloudLadderClient _client;
         private PlayerProfileBridge _profile;
 
@@ -43,6 +73,8 @@ namespace PeakCSR
 
         private readonly List<CsrHistoryEntry> _history = new List<CsrHistoryEntry>();
         private bool _historyLoading;
+        // 加载中又来了强制刷新: 记下这次请求, 等当前请求结束再补一次
+        private bool _historyForcePending;
         private CloudProfile _myProfile = new CloudProfile();
         private readonly Dictionary<string, CloudProfile> _profileCache = new Dictionary<string, CloudProfile>();
 
@@ -86,10 +118,148 @@ namespace PeakCSR
             Instance = this;
         }
 
+        // 云端权威结算完成后在聊天框播报一次, 让玩家明确知道分数已入账
+        private static void AnnounceCloudSettled(int elo, string verifyMethod)
+        {
+            try
+            {
+                MatchCoordinator coordinator = MatchCoordinator.Instance;
+                if (coordinator == null) return;
+                string detail = string.IsNullOrEmpty(verifyMethod) ? "cloud" : verifyMethod;
+                coordinator.Gateway.PushSystemChat(CsrLoc.T("chat.match.settled", elo, detail));
+            }
+            catch
+            {
+            }
+        }
+
         private void Start()
         {
             RefreshLeaderboard();
             SyncMyCloudProfile();
+            // 启动即尝试补传上一局没收尾的战报
+            DrainPendingReports();
+        }
+
+        private void Update()
+        {
+            // 待补传队列的定时驱动 (比协程更好控: 玩家在任意界面都在补传)
+            if (_pendingReports.Count == 0 || _pendingDrainRunning) return;
+            float now = Time.realtimeSinceStartup;
+            for (int i = 0; i < _pendingReports.Count; i++)
+            {
+                if (now >= _pendingReports[i].NextAttemptAt) { DrainPendingReports(); break; }
+            }
+        }
+
+        // 战报在重试窗口内未结算时由 CloudLadderClient 回调登记
+        public void EnqueuePendingReport(
+            string inviteCode, string opponentSteamId, string opponentName, int opponentElo,
+            string winnerSteamId, int seed, int levelIndex, int ascent, McsrRuleFormat format, int route,
+            long durationMs, float myProgress01, float oppProgress01, bool isVoid, string voidReason)
+        {
+            if (string.IsNullOrEmpty(inviteCode) || string.IsNullOrEmpty(opponentSteamId)) return;
+            // 同一场 (房间+种子) 只留一条, 重复登记直接刷新时间戳
+            for (int i = 0; i < _pendingReports.Count; i++)
+            {
+                PendingReport e = _pendingReports[i];
+                if (e.InviteCode == inviteCode && e.Seed == seed)
+                {
+                    e.NextAttemptAt = Time.realtimeSinceStartup + PendingRetryIntervalSeconds;
+                    return;
+                }
+            }
+            _pendingReports.Add(new PendingReport
+            {
+                InviteCode = inviteCode,
+                OpponentSteamId = opponentSteamId,
+                OpponentName = opponentName,
+                OpponentElo = opponentElo,
+                WinnerSteamId = winnerSteamId,
+                Seed = seed,
+                LevelIndex = levelIndex,
+                Ascent = ascent,
+                Format = format,
+                Route = route,
+                DurationMs = durationMs,
+                MyProgress = myProgress01,
+                OppProgress = oppProgress01,
+                IsVoid = isVoid,
+                VoidReason = voidReason ?? "",
+                Attempts = 0,
+                NextAttemptAt = Time.realtimeSinceStartup + PendingRetryIntervalSeconds
+            });
+            _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Pending };
+            PcsrLog.LogInfo("[PeakCSR] 战报已登记待补传队列 (共 " + _pendingReports.Count + " 条)。");
+        }
+
+        public int PendingReportCount { get { return _pendingReports.Count; } }
+
+        // 把队列里到期的战报逐条重投 (只跑一个协程, 避免并发互踩)
+        public void DrainPendingReports()
+        {
+            if (!IsCloudConfigured()) return;
+            if (_pendingDrainRunning) return;
+            if (_pendingReports.Count == 0) return;
+            StartCoroutine(DrainPendingReportsRoutine());
+        }
+
+        private IEnumerator DrainPendingReportsRoutine()
+        {
+            _pendingDrainRunning = true;
+            try
+            {
+                float now = Time.realtimeSinceStartup;
+                // 拷贝一份快照, 回调里可能改动队列
+                List<PendingReport> batch = new List<PendingReport>();
+                for (int i = 0; i < _pendingReports.Count; i++)
+                {
+                    if (_pendingReports[i].NextAttemptAt <= now) batch.Add(_pendingReports[i]);
+                }
+
+                for (int i = 0; i < batch.Count; i++)
+                {
+                    PendingReport e = batch[i];
+                    e.Attempts++;
+
+                    CloudLadderClient.ReportResult delivered = null;
+                    // useRetryLadder: false —— 队列只管单次请求, 重投节奏由 Attempts/NextAttemptAt 控制
+                    yield return _client.ReportMatch(
+                        e.InviteCode, e.OpponentSteamId, e.OpponentName, e.OpponentElo, e.WinnerSteamId,
+                        e.Seed, e.LevelIndex, e.Ascent, e.Format, e.Route, e.DurationMs,
+                        e.MyProgress, e.OppProgress, e.IsVoid, e.VoidReason,
+                        r => { delivered = r; }, false);
+
+                    if (delivered != null && delivered.Settled)
+                    {
+                        _pendingReports.Remove(e);
+                        _profile.ApplyCloudAuthoritativeElo(delivered.AuthElo);
+                        _cloudStatus = new CloudStatusView
+                        {
+                            Kind = delivered.IsVoid ? CloudStatusKind.Voided : CloudStatusKind.Settled,
+                            Elo = delivered.AuthElo,
+                            Detail = delivered.VerifyMethod
+                        };
+                        PcsrLog.LogInfo("[PeakCSR] 待补传战报补发成功 (" + delivered.VerifyMethod + ") -> ELO " + delivered.AuthElo);
+                        AnnounceCloudSettled(delivered.AuthElo, delivered.VerifyMethod);
+                        RefreshLeaderboard();
+                        RefreshHistory(true);
+                        continue;
+                    }
+
+                    if (e.Attempts >= MaxPendingAttempts)
+                    {
+                        _pendingReports.Remove(e);
+                        PcsrLog.LogWarning("[PeakCSR] 待补传战报重试 " + e.Attempts + " 次仍失败，已放弃 (房间 " + e.InviteCode + ")。");
+                        continue;
+                    }
+                    e.NextAttemptAt = Time.realtimeSinceStartup + PendingRetryIntervalSeconds;
+                }
+            }
+            finally
+            {
+                _pendingDrainRunning = false;
+            }
         }
 
         public bool IsCloudConfigured()
@@ -124,7 +294,12 @@ namespace PeakCSR
         public void RefreshHistory(bool force = false)
         {
             if (!IsCloudConfigured()) return;
-            if (_historyLoading) return;
+            if (_historyLoading)
+            {
+                // 结算刚落地时正在跑的请求可能读到的是结算前的历史, 必须补一次而不是丢掉
+                if (force) _historyForcePending = true;
+                return;
+            }
             if (!force && _history.Count > 0) return;
             StartCoroutine(FetchHistoryRoutine());
         }
@@ -158,33 +333,35 @@ namespace PeakCSR
             return null;
         }
 
-        // 上传玩家自选的偏好档案 (保留昵称不变, null 表示沿用云端已有的)
+        // 上传玩家自选的偏好档案 (保留云端昵称不变)
         public void PushFavoriteProfile(int favoriteMap, int favoriteAscent, int favoriteFormat)
         {
-            PushProfile(favoriteMap, favoriteAscent, favoriteFormat, null, null);
+            PushProfileInternal(favoriteMap, favoriteAscent, favoriteFormat, "", true, null);
         }
 
         // 修改 PCSR 昵称, 空串 = 沿用 Steam 昵称
         public void PushNickname(string nickname, int favoriteMap, int favoriteAscent, int favoriteFormat, Action<bool, string> onDone)
         {
-            PushProfile(favoriteMap, favoriteAscent, favoriteFormat, nickname, onDone);
+            PushProfileInternal(favoriteMap, favoriteAscent, favoriteFormat, nickname, false, onDone);
         }
 
-        // nickname 传 null 表示本次不改昵称(用云端已有值), 传 "" 表示清空回退到 Steam 昵称
+        // pushNickname = false 表示本次完全不碰昵称
         public void PushProfile(int favoriteMap, int favoriteAscent, int favoriteFormat, string nickname, Action<bool, string> onDone)
+        {
+            PushProfileInternal(favoriteMap, favoriteAscent, favoriteFormat, nickname, false, onDone);
+        }
+
+        // keepNickname: 明确告诉云端"这次不要动昵称"。
+        private void PushProfileInternal(int favoriteMap, int favoriteAscent, int favoriteFormat,
+            string nickname, bool keepNickname, Action<bool, string> onDone)
         {
             if (!IsCloudConfigured())
             {
                 if (onDone != null) onDone(false, "cloud_unconfigured");
                 return;
             }
-            string effectiveNick = nickname;
-            if (effectiveNick == null)
-            {
-                // 不改昵称时必须带云端现值, 否则签名与 UPDATE 会把昵称写空
-                effectiveNick = _myProfile != null ? (_myProfile.Nickname ?? "") : "";
-            }
-            StartCoroutine(PushProfileRoutine(favoriteMap, favoriteAscent, favoriteFormat, effectiveNick, onDone));
+            string effectiveNick = keepNickname ? "" : (nickname ?? "");
+            StartCoroutine(PushProfileRoutine(favoriteMap, favoriteAscent, favoriteFormat, effectiveNick, keepNickname, onDone));
         }
 
         // 自己的档案卡入口: 云端没有档案时也要能打开(用于预先起昵称)
@@ -287,12 +464,21 @@ namespace PeakCSR
             string steamId = SafeSteamId();
             if (string.IsNullOrEmpty(steamId)) yield break;
 
+            // 请求发出前记下评分修订号
+            int revisionAtStart = _profile.RatingRevision;
+
             bool done = false;
             yield return _client.FetchProfile(steamId, delegate(CloudProfile p, int rank)
             {
                 done = true;
                 if (p != null)
                 {
+                    if (_profile.RatingRevision != revisionAtStart)
+                    {
+                        PcsrLog.LogInfo("[PeakCSR] 自身档案快照已过期 (期间发生过结算)，丢弃本次回灌。");
+                        return;
+                    }
+
                     _myProfile = p;
                     _profileCache[steamId] = p;
 
@@ -306,7 +492,7 @@ namespace PeakCSR
                     }
 
                     _profile.ApplyCloudAuthoritativeState(
-                        p.Elo, p.PeakElo, p.Wins, p.Losses, p.Streak,
+                        p.Elo, p.PeakElo, p.Wins, p.Losses, p.Draws, p.Streak,
                         p.WinsAllPeak, p.LossesAllPeak,
                         p.WinsHardcore, p.LossesHardcore,
                         p.WinsSprint, p.LossesSprint,
@@ -336,21 +522,36 @@ namespace PeakCSR
             string steamId = SafeSteamId();
             if (string.IsNullOrEmpty(steamId)) yield break;
             _historyLoading = true;
+
+            bool ok = false;
             yield return _client.FetchHistory(steamId, delegate(List<CsrHistoryEntry> list)
             {
-                _historyLoading = false;
-                _history.Clear();
-                if (list != null) _history.AddRange(list);
+                // list == null 表示请求失败或响应无法解析: 保留上一次成功的结果, 不要把面板清空
+                ok = list != null;
+                if (ok)
+                {
+                    _history.Clear();
+                    _history.AddRange(list);
+                }
             });
+            _historyLoading = false;
+            if (!ok) PcsrLog.LogInfo("[PeakCSR] 历史战绩拉取失败，保留上一次的结果。");
+
+            // 加载期间被压下的强制刷新, 在这里补跑一次
+            if (_historyForcePending)
+            {
+                _historyForcePending = false;
+                if (ok) StartCoroutine(FetchHistoryRoutine());
+            }
         }
 
         private IEnumerator PushProfileRoutine(
             int favoriteMap, int favoriteAscent, int favoriteFormat,
-            string nickname, Action<bool, string> onDone)
+            string nickname, bool keepNickname, Action<bool, string> onDone)
         {
             bool ok = false;
             string errCode = "";
-            yield return _client.PushProfile(favoriteMap, favoriteAscent, favoriteFormat, nickname, delegate(bool success, string error)
+            yield return _client.PushProfile(favoriteMap, favoriteAscent, favoriteFormat, nickname, keepNickname, delegate(bool success, string error)
             {
                 ok = success;
                 errCode = error;
@@ -376,6 +577,20 @@ namespace PeakCSR
                 isVoid, voidReason,
                 delegate(CloudLadderClient.ReportResult r)
                 {
+                    // 这里只更新状态文案, 不做权威分数覆盖 (云端还没算)
+                    if (r == null)
+                    {
+                        _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Pending };
+                        PcsrLog.LogInfo("[PeakCSR] 战报暂未结算，已转入待补传队列，稍后自动补发。");
+                        return;
+                    }
+                    if (r.Failed)
+                    {
+                        // 两次上报全部失败: 这不是"等对手", 要让玩家看到真实原因 (同时已在待补传队列里)
+                        _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Error, Detail = "report_failed" };
+                        PcsrLog.LogWarning("[PeakCSR] 战报上报失败，已转入待补传队列，稍后自动补发。");
+                        return;
+                    }
                     delivered = r;
                     if (r.IsVoid)
                     {
@@ -389,13 +604,20 @@ namespace PeakCSR
                         _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Settled, Elo = r.AuthElo, Detail = r.VerifyMethod };
                     }
                     PcsrLog.LogInfo("[PeakCSR] 云端天梯权威结算完成 (" + r.VerifyMethod + ") -> 当前 ELO: " + r.AuthElo);
+                    AnnounceCloudSettled(r.AuthElo, r.VerifyMethod);
                     RefreshLeaderboard();
                     RefreshHistory(true);
                 });
 
             if (delivered == null)
             {
+                // 队列兜底: 这里只在异常情况 (协程被提前打断) 兜一手, 保证不会静默丢失。
                 _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Pending };
+            }
+            else
+            {
+                // 结算成功后立刻再尝试把队列里其它待补传的局推掉
+                DrainPendingReports();
             }
         }
 
