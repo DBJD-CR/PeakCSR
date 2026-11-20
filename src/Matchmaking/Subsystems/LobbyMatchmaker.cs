@@ -28,6 +28,7 @@ namespace PeakCSR
         public void TickQueuePoll(MatchSession session)
         {
             if (session.LobbyFetchInFlight) return;
+            if (session.RoomOpInFlight) return;
             if (Time.realtimeSinceStartup < session.NextLobbyPollTime) return;
             if (_gw.ServiceAvailable == false) return;
 
@@ -41,6 +42,8 @@ namespace PeakCSR
             session.LobbyFetchInFlight = false;
             UpdateQueueStats(entries);
 
+            // 已取消/已被替换的搜索: 这个回调既不能发起 join, 也不能拆会话
+            if (!IsStillCurrent(session)) return;
             if (session.State != CsMatchState.SearchingLobby) return;
 
             bool sawIncompatibleCsrLobby = false;
@@ -61,8 +64,11 @@ namespace PeakCSR
 
                     if (!item.Compatible)
                     {
+                        // 只有"本来可以加入"的房间 (lobby 且有空位) 才算环境不匹配
                         if (RoomMagicCodec.IsCsrMagicMs(item.AutoEndMs)
-                            && item.AutoEndMs == RoomMagicCodec.GetMagicAutoEndMs(session.Format, session.Ascent))
+                            && item.AutoEndMs == RoomMagicCodec.GetMagicAutoEndMs(session.Format, session.Ascent)
+                            && item.Status == "lobby"
+                            && !item.IsFull)
                         {
                             sawIncompatibleCsrLobby = true;
                         }
@@ -74,7 +80,16 @@ namespace PeakCSR
                     session.StatusMessage = CsrLoc.T("status.found_joining", item.InviteCode);
                     PcsrLog.LogInfo("[PeakCSR] 找到匹配的 PCSR 1v1 房间 [" + item.InviteCode + "]，正在加入...");
                     session.Notify();
-                    _gw.JoinRace(item.InviteCode, race => _owner.OnRaceJoined(session, race), err => OnLobbyError(session, err));
+                    session.RoomOpInFlight = true;
+                    _gw.JoinRace(item.InviteCode, race =>
+                    {
+                        session.RoomOpInFlight = false;
+                        _owner.OnRaceJoined(session, race);
+                    }, err =>
+                    {
+                        session.RoomOpInFlight = false;
+                        OnLobbyError(session, err);
+                    });
                     return;
                 }
             }
@@ -97,12 +112,17 @@ namespace PeakCSR
 
         private void OnQueueError(MatchSession session, string err)
         {
+            if (!IsStillCurrent(session)) return;
             OnLobbyError(session, err);
         }
 
+        // 回调可能属于一个已经被取消/替换掉的搜索: 用会话身份与状态双重过滤
+        private bool IsStillCurrent(MatchSession session)
+        {
+            return session != null && ReferenceEquals(session, _owner.CurrentSession);
+        }
+
         // ===== 双方各建一房时的收敛 =====
-        // 现象: 两人同时点匹配, 各自 FetchLobbies 都看到空列表 → 各自 CreateRace
-        // 结果互相看不到对方的房 (各自的 CurrentRace 已存在, 主轮询已停), 于是永远各关一个房
         public void TickConvergePoll(MatchSession session)
         {
             if (session.ConvergeFetchInFlight) return;
@@ -117,9 +137,16 @@ namespace PeakCSR
             if (session.RoomEnteredAt > 0f && Time.realtimeSinceStartup - session.RoomEnteredAt < MatchSession.ConvergeMinRoomAgeSeconds) return;
             if (Time.realtimeSinceStartup < session.NextConvergePollTime) return;
 
+            if (session.RoomOpInFlight) return;
+
             session.ConvergeFetchInFlight = true;
             session.NextConvergePollTime = Time.realtimeSinceStartup + MatchSession.ConvergePollIntervalSeconds;
-            _gw.FetchLobbies((entries, total) => OnConvergeLobbies(session, entries), err => { session.ConvergeFetchInFlight = false; });
+            _gw.FetchLobbies((entries, total) => OnConvergeLobbies(session, entries), err =>
+            {
+                session.ConvergeFetchInFlight = false;
+                if (!IsStillCurrent(session)) return;
+                session.SwitchingRerollRoom = false;
+            });
         }
 
         private void OnConvergeLobbies(MatchSession session, List<RaceLobbyEntry> entries)
@@ -127,6 +154,7 @@ namespace PeakCSR
             session.ConvergeFetchInFlight = false;
             UpdateQueueStats(entries);
 
+            if (!IsStillCurrent(session)) return;
             if (session.State != CsMatchState.WaitingOpponent) return;
             if (session.OpponentVerified || !string.IsNullOrEmpty(session.OpponentSteamId)) return;
             if (session.StartCountdownUntil > 0f) return;
@@ -139,11 +167,13 @@ namespace PeakCSR
             session.StatusMessage = CsrLoc.T("status.converging", rival.InviteCode);
 
             session.SwitchingRerollRoom = true;   // 抑制旧房关闭时的空 race 回调
+            session.RoomOpInFlight = true;
             string target = rival.InviteCode;
             _gw.LeaveRace();
 
             _gw.JoinRace(target, race =>
             {
+                session.RoomOpInFlight = false;
                 session.SwitchingRerollRoom = false;
                 session.StrictRulesetJoin = false;
                 if (race != null)
@@ -153,9 +183,15 @@ namespace PeakCSR
                 }
             }, err =>
             {
+                session.RoomOpInFlight = false;
                 session.SwitchingRerollRoom = false;
                 PcsrLog.LogWarning("[PeakCSR] 收敛迁移失败: " + err);
-                session.StatusMessage = CsrLoc.T("status.error", err);
+                // 直接回到搜索队列重新找房
+                session.InviteCode = "";
+                session.State = CsMatchState.SearchingLobby;
+                session.NextLobbyPollTime = 0f;
+                session.NextConvergePollTime = 0f;
+                session.StatusMessage = CsrLoc.T("status.converge_failed_requeue", err);
                 session.Notify();
             });
             session.Notify();
@@ -208,9 +244,18 @@ namespace PeakCSR
             PcsrLog.LogInfo("[PeakCSR] 正在创建 PCSR 1v1 房间 (公开=" + isPublicLobby + ", 地图=#" + session.LevelIndex + " " + biomeLabel + ", 难度=" + MatchNaming.GetAscentDisplayName(session.Ascent) + ")...");
             session.Notify();
 
+            session.RoomOpInFlight = true;
             _gw.CreateRace(session.Seed, session.LevelIndex, session.Ascent, session.Route, isPublicLobby,
-                race => _owner.OnRaceJoined(session, race),
-                err => OnLobbyError(session, err));
+                race =>
+                {
+                    session.RoomOpInFlight = false;
+                    _owner.OnRaceJoined(session, race);
+                },
+                err =>
+                {
+                    session.RoomOpInFlight = false;
+                    OnLobbyError(session, err);
+                });
         }
 
         // ===== 队列统计 (原 UpdateQueueStats 原样迁移) =====
@@ -283,13 +328,14 @@ namespace PeakCSR
             session.Ascent = race.Ascent;
             session.Route = race.Route;
 
-            // 登记本局路线起点与长度, 供分段采集裁剪使用
-            // 单群系: 从 (route-1) 号群系开始, 长度 = 该群系包含的段数
+            // 登记本局路线区间, 供分段采集裁剪使用
+            // 单群系: 起点/长度都来自真实进度点表
             // 全山: -1 / -1 表示取已记录的最大索引
-            if (session.Route > 0)
+            int routeStart;
+            int routeLen;
+            if (session.TryResolveRouteSpan(out routeStart, out routeLen))
             {
-                int segCount = session.CountSegmentsOfBiome(session.LevelIndex, session.Route - 1);
-                session.Splits.SetRoute(session.Route - 1, segCount);
+                session.Splits.SetRoute(routeStart, routeLen);
             }
             else
             {
@@ -334,6 +380,8 @@ namespace PeakCSR
         {
             session.SwitchingRerollRoom = false;
             session.LobbyFetchInFlight = false;
+            session.RoomOpInFlight = false;
+            if (!IsStillCurrent(session)) return;
 
             if (IsEnvironmentMismatchError(err))
             {
