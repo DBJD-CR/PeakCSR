@@ -3,14 +3,7 @@ CREATE TABLE IF NOT EXISTS match_reports (invite_code TEXT NOT NULL, reporter_st
 CREATE TABLE IF NOT EXISTS settled_matches (match_key TEXT PRIMARY KEY, invite_code TEXT NOT NULL, seed INTEGER NOT NULL, winner_steam_id TEXT NOT NULL, loser_steam_id TEXT NOT NULL, winner_delta INTEGER NOT NULL, loser_delta INTEGER NOT NULL, win_elo_before INTEGER NOT NULL DEFAULT 0, win_elo_after INTEGER NOT NULL DEFAULT 0, lose_elo_before INTEGER NOT NULL DEFAULT 0, lose_elo_after INTEGER NOT NULL DEFAULT 0, level_index INTEGER NOT NULL DEFAULT 0, ascent INTEGER NOT NULL DEFAULT 0, format INTEGER NOT NULL DEFAULT 0, route INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER NOT NULL DEFAULT 0, winner_progress REAL NOT NULL DEFAULT 0, loser_progress REAL NOT NULL DEFAULT 0, verify_method TEXT NOT NULL, is_void INTEGER NOT NULL DEFAULT 0, settled_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS admin_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, payload TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_players_elo ON players(elo DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_players_nickname ON players(nickname) WHERE nickname <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_players_nickname ON players(nickname COLLATE NOCASE) WHERE nickname <> '';
 CREATE INDEX IF NOT EXISTS idx_settled_winner ON settled_matches(winner_steam_id, settled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_settled_loser ON settled_matches(loser_steam_id, settled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_settled_invite ON settled_matches(invite_code);
-
--- 存量库升级 (已建过表的库执行这些即可, 新库可忽略):
--- ALTER TABLE players ADD COLUMN nickname TEXT NOT NULL DEFAULT '';
--- ALTER TABLE players ADD COLUMN nickname_updated_at INTEGER NOT NULL DEFAULT 0;
--- CREATE UNIQUE INDEX IF NOT EXISTS idx_players_nickname ON players(nickname) WHERE nickname <> '';
--- ALTER TABLE match_reports ADD COLUMN route INTEGER NOT NULL DEFAULT 0;
--- ALTER TABLE settled_matches ADD COLUMN route INTEGER NOT NULL DEFAULT 0;

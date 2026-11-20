@@ -51,9 +51,17 @@ export async function handleProfileUpdate(body, env) {
   // 签名顺序必须与 src/Ladder/CloudLadderClient.cs 的 PushProfile 完全一致
   const rawSigStr = `${steamId}|${favoriteMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${keepNickname ? 1 : 0}|${SHARED_SALT}`;
   const expectedSig = await sha256Hex16(rawSigStr);
+  const legacySigStr = `${steamId}|${favoriteMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${SHARED_SALT}`;
+  const legacySig = await sha256Hex16(legacySigStr);
+
+  let legacyClient = false;
   if (signature !== expectedSig) {
-    return jsonResp({ ok: false, error: "Signature verification failed" }, 403);
+    if (signature !== legacySig) {
+      return jsonResp({ ok: false, error: "Signature verification failed" }, 403);
+    }
+    legacyClient = true;
   }
+  const effectiveKeepNickname = keepNickname || (legacyClient && nickname === "");
 
   // 建档: 不存在时直接创建, 让玩家不用先打一局就能拥有档案
   // 初始分必须用客户端上报的种子分 (从原版 RANKED 软折算而来), 不能默认 1000,
@@ -71,9 +79,12 @@ export async function handleProfileUpdate(body, env) {
   binds.push(favoriteMap, favoriteAscent, favoriteFormat);
 
   const currentNick = player.nickname || "";
+  // 昵称等价性按大小写不敏感判定: 只改大小写不算改名, 不消耗冷却也不必回写
+  const nickEquivalent = currentNick.toLowerCase() === nickname.toLowerCase();
   let nickChanged = false;
-  // keepNickname 时整段跳过昵称处理
-  if (!keepNickname && nickname !== currentNick) {
+  // 抢占新昵称: 用单条 UPDATE 的条件子句做原子判定, 避免两次请求同时通过查询
+  let claimNickname = false;
+  if (!effectiveKeepNickname && !nickEquivalent) {
     if (nickname !== "") {
       // 冷却只约束"改成新昵称": 首次命名或改名后 24h 内不能再次改名
       const lastChange = player.nickname_updated_at || 0;
@@ -85,12 +96,7 @@ export async function handleProfileUpdate(body, env) {
           cooldownHours: remainH
         }, 429);
       }
-      const taken = await env.DB.prepare(
-        "SELECT steam_id FROM players WHERE nickname = ? COLLATE NOCASE AND steam_id <> ?"
-      ).bind(nickname, steamId).first();
-      if (taken) {
-        return jsonResp({ ok: false, error: "Nickname already taken" }, 409);
-      }
+      claimNickname = true;
       updates.push("nickname = ?", "nickname_updated_at = ?");
       binds.push(nickname, now);
     } else {
@@ -105,10 +111,20 @@ export async function handleProfileUpdate(body, env) {
   binds.push(now);
   binds.push(steamId);
 
+  // 抢占昵称时把占用检查内联进 WHERE: SQLite 单条语句原子执行,
+  // "查是否被占"与"写入"不会像先 SELECT 再 UPDATE 那样被并发穿过
+  let updateSql = "UPDATE players SET " + updates.join(", ") + " WHERE steam_id = ?";
+  let updateBinds = binds;
+  if (claimNickname) {
+    updateSql += " AND NOT EXISTS (SELECT 1 FROM players p2"
+      + " WHERE p2.nickname = ? COLLATE NOCASE AND p2.steam_id <> players.steam_id)";
+    updateBinds = binds.concat([nickname]);
+  }
+
+  let changed = 0;
   try {
-    await env.DB.prepare(
-      "UPDATE players SET " + updates.join(", ") + " WHERE steam_id = ?"
-    ).bind(...binds).run();
+    const res = await env.DB.prepare(updateSql).bind(...updateBinds).run();
+    changed = (res && res.meta && res.meta.changes) || 0;
   } catch (e) {
     // 唯一索引兜底: 并发抢占同名昵称
     const msg = String((e && e.message) || e);
@@ -116,6 +132,10 @@ export async function handleProfileUpdate(body, env) {
       return jsonResp({ ok: false, error: "Nickname already taken" }, 409);
     }
     throw e;
+  }
+  // 守卫子句命中: 说明昵称已被别人占用
+  if (claimNickname && changed === 0) {
+    return jsonResp({ ok: false, error: "Nickname already taken" }, 409);
   }
 
   return jsonResp({
