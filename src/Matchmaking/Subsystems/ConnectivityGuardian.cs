@@ -149,6 +149,25 @@ namespace PeakCSR
             session.Notify();
         }
 
+        // 观察窗恢复判定的唯一实现: RaceUpdated 回调与 guardian tick 必须共用同一套证据
+        // 返回 true 表示本次确实撤销了观察窗 (调用方不要再重复处理)
+        public bool TryRecoverFromObservation(MatchSession session, RankedPeak.Services.RaceInfo race)
+        {
+            if (session == null || !session.ObservingDisconnect) return false;
+            if (race == null) return false;
+            // 已经收尾的房间不算"恢复": 那份快照属于旧局, 拿它续局会按旧数据结算
+            if (race.Status == "finished") return false;
+            if (!IsRecoveryEvidenced(session)) return false;
+            if (!IsLocalConnectivityHealthy(session)) return false;
+
+            session.ObservingDisconnect = false;
+            session.ObservationNeedsLiveEvidence = false;
+            session.DisconnectReason = "";
+            ClearDisconnectFreeze(session);
+            PcsrLog.LogInfo("[PeakCSR] 观察窗内连接已恢复，继续对局，不做任何结算。");
+            return true;
+        }
+
         public void TickDisconnectObserver(MatchSession session)
         {
             if (session == null) return;
@@ -159,14 +178,8 @@ namespace PeakCSR
             try
             {
                 RankedPeak.Services.RaceInfo race = _gw.CurrentRace;
-                if (race != null && race.Status != "finished"
-                    && IsRecoveryEvidenced(session) && IsLocalConnectivityHealthy(session))
+                if (TryRecoverFromObservation(session, race))
                 {
-                    session.ObservingDisconnect = false;
-                    session.ObservationNeedsLiveEvidence = false;
-                    session.DisconnectReason = "";
-                    ClearDisconnectFreeze(session);
-                    PcsrLog.LogInfo("[PeakCSR] 观察窗内连接已恢复，继续对局，不做任何结算。");
                     if (session.State != CsMatchState.Finished) session.SyncFromRaceInfo(race);
                     return;
                 }
