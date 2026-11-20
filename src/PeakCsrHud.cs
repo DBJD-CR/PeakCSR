@@ -11,7 +11,7 @@ namespace PeakCSR
         private bool _showLeaderboard;
         private bool _confirmForfeit;
         private string _inviteCodeInput = "";
-        private Rect _windowRect = new Rect(24f, 140f, 460f, 440f);
+        private Rect _windowRect = new Rect(24f, 140f, 480f, 520f);
 
         private GUIStyle _headerStyle;
         private GUIStyle _subStyle;
@@ -35,7 +35,6 @@ namespace PeakCSR
             PcsrMenuWindow.ShowWindow();
         }
 
-        // 进入对局跑图时自动收起面板, 避免遮挡原生 HUD
         private void LateUpdate()
         {
             if (!_visible) return;
@@ -66,9 +65,7 @@ namespace PeakCSR
         private void OnGUI()
         {
             if (Plugin.Instance == null) return;
-            // 对局进行中保持干净的原生 HUD; 仅待机/结算可见
             if (!_visible) return;
-            // 原生窗口已接管主界面时不再叠一层 IMGUI
             if (PcsrMenuWindow.Instance != null && PcsrMenuWindow.Instance.IsOpen) return;
             InitStyles();
             string title = CsrLoc.T("hud.window.title", Plugin.Instance.ToggleMenuKey.Value);
@@ -83,10 +80,9 @@ namespace PeakCSR
             int elo = EloCalculator.CurrentElo;
             string tierHex = EloCalculator.GetTierHexColor(elo);
             string tierName = EloCalculator.GetTierName(elo);
-            int totalGames = EloCalculator.Wins + EloCalculator.Losses;
-            int winRate = totalGames > 0 ? (EloCalculator.Wins * 100 / totalGames) : 0;
+            int winRate = EloCalculator.WinRatePercent;
 
-            // 1. 顶部选手段位卡片、全服榜开关与语言切换按钮
+            // 1. 顶部选手段位卡片
             GUILayout.BeginVertical(GUI.skin.box);
             GUILayout.BeginHorizontal();
             GUILayout.Label("<color=#" + tierHex + ">★ " + tierName + "</color>   |   <b>" + elo + " ELO</b>", _headerStyle);
@@ -108,7 +104,8 @@ namespace PeakCSR
                 CsrLoc.ToggleLanguage();
             }
             GUILayout.EndHorizontal();
-            GUILayout.Label(CsrLoc.T("hud.record", EloCalculator.Wins, EloCalculator.Losses, winRate, EloCalculator.Streak) + "   |   " + CsrLoc.T("hud.peak", EloCalculator.PeakElo), _subStyle);
+            GUILayout.Label(CsrLoc.T("hud.record", EloCalculator.Wins, EloCalculator.Losses, winRate, EloCalculator.Streak)
+                + "   |   " + CsrLoc.T("hud.peak", EloCalculator.PeakElo), _subStyle);
             GUILayout.EndVertical();
 
             if (_showLeaderboard)
@@ -120,7 +117,7 @@ namespace PeakCSR
 
             GUILayout.Space(4f);
 
-            // 2. 赛制与天阶难度选择区（仅在 Idle 状态可切换）
+            // 2. 赛制与难度选择区
             double mult = EloCalculator.GetModeMultiplier(mc.SelectedFormat, mc.SelectedAscent);
             GUILayout.BeginVertical(GUI.skin.box);
             GUILayout.Label(CsrLoc.T("hud.ruleset.label", mc.GetCurrentFormatDisplayName(), mult.ToString("F2")), _subStyle);
@@ -132,28 +129,26 @@ namespace PeakCSR
                 DrawFormatButton(mc, McsrRuleFormat.BiomeSprint, CsrLoc.T("hud.format.sprint"));
                 GUILayout.EndHorizontal();
 
-                // 若选择了高难天阶或单群系冲刺，允许调节天阶等级 (A1~A8)
-                if (mc.SelectedFormat != McsrRuleFormat.StandardAllPeak)
+                // 难度始终可调: 菜鸟新人 A-1 / 标准顶峰 A0 / 天阶 A1~A8
+                GUILayout.Space(2f);
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(CsrLoc.T("hud.ascent.select",
+                    MatchController.GetAscentDisplayName(mc.SelectedAscent), mult.ToString("F2")), _subStyle);
+                if (GUILayout.Button("-", GUILayout.Width(28f), GUILayout.Height(20f)))
                 {
-                    GUILayout.Space(2f);
-                    GUILayout.BeginHorizontal();
-                    GUILayout.Label(CsrLoc.T("hud.ascent.select", mc.SelectedAscent, mult.ToString("F2")), _subStyle);
-                    if (GUILayout.Button("-", GUILayout.Width(28f), GUILayout.Height(20f)))
-                    {
-                        mc.SelectedAscent = mc.SelectedAscent - 1;
-                    }
-                    if (GUILayout.Button("+", GUILayout.Width(28f), GUILayout.Height(20f)))
-                    {
-                        mc.SelectedAscent = mc.SelectedAscent + 1;
-                    }
-                    GUILayout.EndHorizontal();
+                    mc.SelectedAscent = mc.SelectedAscent - 1;
                 }
+                if (GUILayout.Button("+", GUILayout.Width(28f), GUILayout.Height(20f)))
+                {
+                    mc.SelectedAscent = mc.SelectedAscent + 1;
+                }
+                GUILayout.EndHorizontal();
             }
             GUILayout.EndVertical();
 
             GUILayout.Space(4f);
 
-            // 3. 好友邀请码直连 / 创建私密房区（仅在 Idle 状态展示）
+            // 3. 好友邀请码 / 创建私密房
             if (mc.State == CsMatchState.Idle)
             {
                 GUILayout.BeginVertical(GUI.skin.box);
@@ -169,7 +164,7 @@ namespace PeakCSR
                     mc.CreatePrivate1v1Room();
                 }
                 string ratedLabel = mc.IsRatedMatch ? ("● " + CsrLoc.T("hud.invite.rated")) : ("○ " + CsrLoc.T("hud.invite.unrated"));
-                if (GUILayout.Button(ratedLabel, GUILayout.Width(92f), GUILayout.Height(22f)))
+                if (GUILayout.Button(ratedLabel, GUILayout.Width(100f), GUILayout.Height(22f)))
                 {
                     mc.IsRatedMatch = !mc.IsRatedMatch;
                 }
@@ -178,20 +173,26 @@ namespace PeakCSR
                 GUILayout.Space(4f);
             }
 
-            // 4. 实时房间与对手对抗遥测面板
+            // 4. 对局状态与实时队列情报
             GUILayout.BeginVertical(GUI.skin.box);
             GUILayout.Label(CsrLoc.T("hud.status", mc.StatusMessage), _subStyle);
+
+            CsrQueueStats q = mc.QueueStats;
+            GUILayout.Label(CsrLoc.T("win.queue.live_info",
+                q.OnlinePlayers, q.WaitingRooms, q.ActiveRooms,
+                q.StdWaiting, q.AscWaiting, q.SprWaiting), _subStyle);
 
             if (!string.IsNullOrEmpty(mc.InviteCode))
             {
                 string biomeLabel = MapCatalog.GetBiomeLabel(mc.LevelIndex);
                 string seedDisplay = (mc.State == CsMatchState.Running || mc.State == CsMatchState.Finished) ? mc.Seed.ToString() : CsrLoc.T("hud.seed.hidden");
-                GUILayout.Label(CsrLoc.T("hud.room_info", mc.InviteCode, mc.LevelIndex, biomeLabel, mc.Ascent, seedDisplay), _subStyle);
+                GUILayout.Label(CsrLoc.T("hud.room_info", mc.InviteCode, mc.LevelIndex, biomeLabel,
+                    MatchController.GetAscentShortName(mc.Ascent), seedDisplay), _subStyle);
 
                 string verifyTag = mc.OpponentVerified ? CsrLoc.T("hud.verified.ok") : CsrLoc.T("hud.verified.wait");
-                GUILayout.Label(CsrLoc.T("hud.opponent", mc.OpponentName, mc.OpponentElo, verifyTag), _subStyle);
+                GUILayout.Label(CsrLoc.T("hud.opponent", mc.OpponentName, mc.OpponentElo, verifyTag,
+                    EloCalculator.GetTierName(mc.OpponentElo)), _subStyle);
 
-                // 进度差与状态条
                 float myPct = mc.SelfProgress * 100f;
                 float oppPct = mc.OpponentProgress * 100f;
                 float diffPct = myPct - oppPct;
@@ -199,7 +200,8 @@ namespace PeakCSR
                 string diffSign = diffPct >= 0f ? "+" : "";
 
                 GUILayout.Label(
-                    CsrLoc.T("hud.progress", myPct.ToString("F1"), oppPct.ToString("F1"), diffColor, diffSign, diffPct.ToString("F1")),
+                    CsrLoc.T("hud.progress", myPct.ToString("F1"), oppPct.ToString("F1"), diffColor, diffSign,
+                        diffPct.ToString("F1"), winRate),
                     _subStyle
                 );
 
@@ -216,7 +218,7 @@ namespace PeakCSR
 
             GUILayout.Space(6f);
 
-            // 5. 赛中 30s 投票换图提示框（当收到对手换图请求时高亮展示）
+            // 5. 换图投票提示框
             if (mc.OppRerollVoteActive)
             {
                 GUILayout.BeginVertical(GUI.skin.box);
@@ -255,7 +257,6 @@ namespace PeakCSR
             else if (mc.State == CsMatchState.LoadingLevel || mc.State == CsMatchState.Countdown || mc.State == CsMatchState.Running)
             {
                 GUILayout.BeginHorizontal();
-                // 发起投票换图按钮
                 if (mc.MyRerollVoteActive)
                 {
                     GUI.enabled = false;
@@ -270,7 +271,6 @@ namespace PeakCSR
                     }
                 }
 
-                // 投降按钮（带二次确认）
                 if (!_confirmForfeit)
                 {
                     if (GUILayout.Button(CsrLoc.T("hud.btn.forfeit"), GUILayout.Height(30f)))
@@ -295,11 +295,20 @@ namespace PeakCSR
             else if (mc.State == CsMatchState.Finished)
             {
                 _confirmForfeit = false;
+                // 作废局先说清楚发生了什么, 否则玩家会以为对局凭空消失
+                if (mc.MatchVoided)
+                {
+                    GUILayout.Label("<color=#FFCC66>" + CsrLoc.T("hud.void.notice") + "</color>", _subStyle);
+                }
                 GUILayout.BeginHorizontal();
-                if (GUILayout.Button(CsrLoc.T("hud.btn.queue_next"), GUILayout.Height(32f)))
+                if (GUILayout.Button(CsrLoc.T(mc.MatchVoided ? "hud.btn.void_requeue" : "hud.btn.queue_next"), GUILayout.Height(32f)))
                 {
                     mc.LeaveMatch();
                     mc.Queue1v1();
+                }
+                if (GUILayout.Button(CsrLoc.T("hud.btn.post_report"), GUILayout.Height(32f)))
+                {
+                    PcsrMenuWindow.ShowPostMatchWindow();
                 }
                 if (GUILayout.Button(CsrLoc.T("hud.btn.return_idle"), GUILayout.Height(32f)))
                 {
@@ -335,12 +344,19 @@ namespace PeakCSR
             GUILayout.Space(4f);
             if (svc != null && svc.Entries != null && svc.Entries.Count > 0)
             {
+                string mySteamId = SteamIdentity.GetSteamId64();
                 for (int i = 0; i < svc.Entries.Count && i < 10; i++)
                 {
                     CloudRankEntry e = svc.Entries[i];
                     string c = EloCalculator.GetTierHexColor(e.Elo);
+                    string tierName = EloCalculator.GetTierName(e.Elo);
+                    bool isMe = !string.IsNullOrEmpty(mySteamId) && e.SteamId == mySteamId;
+                    string meTag = isMe ? " <color=#55E673>[我]</color>" : "";
+                    string shownName = e.DisplayName;
+                    if (string.IsNullOrEmpty(shownName)) shownName = CsrLoc.T("common.anonymous");
                     GUILayout.Label(
-                        "<b>#" + e.Rank + "</b>  <color=#" + c + ">" + e.PlayerName + "</color>   —   <b>" + e.Elo + " ELO</b>   (" + e.Wins + "W / " + e.Losses + "L)",
+                        "<b>#" + e.Rank + "</b>  <color=#" + c + ">" + shownName + "</color>" + meTag
+                        + "  <color=#" + c + ">[" + tierName + "]</color>   —   <b>" + e.Elo + " ELO</b>   (" + e.Wins + "W / " + e.Losses + "L)",
                         _subStyle
                     );
                 }
