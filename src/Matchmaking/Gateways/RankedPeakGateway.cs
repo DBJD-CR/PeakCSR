@@ -305,6 +305,150 @@ namespace PeakCSR
             try { return MapCatalog.SegmentBiomeName(levelIndex, segmentIndex) ?? ""; } catch { return ""; }
         }
 
+        // 读取真实进度点: 段名一律取 title, 不做任何字符映射
+        public ProgressPointInfo[] GetProgressPoints()
+        {
+            try
+            {
+                MountainProgressHandler handler = MountainProgressHandler.Instance;
+                if (handler == null || handler.progressPoints == null) return new ProgressPointInfo[0];
+                ProgressPointEx[] pts = ProgressPointEx.From(handler.progressPoints);
+                ProgressPointInfo[] result = new ProgressPointInfo[pts.Length];
+                for (int i = 0; i < pts.Length; i++)
+                {
+                    result[i].HasPosition = pts[i].HasPosition;
+                    result[i].Z = pts[i].Z;
+                    result[i].IsNadir = pts[i].IsNadir;
+                    result[i].Biome = pts[i].BiomeOrdinal;
+                    result[i].Title = pts[i].Title;
+                }
+                return result;
+            }
+            catch (Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 读取进度点失败: " + ex.Message);
+                return new ProgressPointInfo[0];
+            }
+        }
+
+        // 查找"某段终点"对应的出口篝火 Z
+        public bool TryGetCampfireZ(int boundaryPointIndex, out float z)
+        {
+            z = 0f;
+            try
+            {
+                MountainProgressHandler handler = MountainProgressHandler.Instance;
+                MapHandler map = MapHandler.Instance;
+                if (handler == null || handler.progressPoints == null || map == null) return false;
+
+                ProgressPointEx[] pts = ProgressPointEx.From(handler.progressPoints);
+                if (boundaryPointIndex < 0 || boundaryPointIndex >= pts.Length) return false;
+
+                // 段出口对应的目标 Segment: 用目标进度点的 biome 反查该群系在本次地图里的段序号
+                Segment targetSegment = SegmentOfPoint(boundaryPointIndex, pts, map);
+                if (targetSegment == Segment.Void) return false;
+
+                Campfire fire = FindCampfireAdvancingTo(targetSegment);
+                if (fire == null) return false;
+
+                z = fire.transform.position.z;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 查询出口篝火失败: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static Segment SegmentOfPoint(int pointIndex, ProgressPointEx[] pts, MapHandler map)
+        {
+            if (pts == null || map == null) return Segment.Void;
+            try
+            {
+                System.Collections.Generic.List<Biome.BiomeType> mapBiomes = map.biomes;
+                if (mapBiomes == null) return Segment.Void;
+                Biome.BiomeType biome = (Biome.BiomeType)pts[pointIndex].BiomeRaw;
+                int idx = mapBiomes.IndexOf(biome);
+                if (idx < 0) return Segment.Void;
+                // 群系序号 -> 段枚举 依次对应 0..5
+                int seg = idx;
+                if (seg < 0 || seg > (int)Segment.Peak) return Segment.Void;
+                return (Segment)seg;
+            }
+            catch
+            {
+                return Segment.Void;
+            }
+        }
+
+        private static Campfire FindCampfireAdvancingTo(Segment segment)
+        {
+            try
+            {
+                Campfire[] all = UnityEngine.Object.FindObjectsByType<Campfire>(FindObjectsSortMode.None);
+                for (int i = 0; i < all.Length; i++)
+                {
+                    Campfire f = all[i];
+                    if (f == null || f.advanceToSegment != segment) continue;
+                    // 迷你跑终点篝火的 advanceToSegment 也指向下一段, 同样被命中
+                    return f;
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        // 本局路线的进度点区间: 优先用真实群系归属
+        public bool TryResolveRouteSpanFor(int route, out int startIndex, out int endIndex)
+        {
+            startIndex = 0;
+            endIndex = -1;
+            try
+            {
+                MountainProgressHandler handler = MountainProgressHandler.Instance;
+                if (handler == null || handler.progressPoints == null) return false;
+                ProgressPointEx[] pts = ProgressPointEx.From(handler.progressPoints);
+                if (pts.Length < 2) return false;
+
+                int last = pts.Length - 1;
+                while (last > 0 && pts[last].IsNadir) last--;
+                if (last < 1) return false;
+
+                // 全山: 0 .. last
+                if (route <= 0)
+                {
+                    startIndex = 0;
+                    endIndex = last;
+                    return true;
+                }
+
+                // 单群系: 起点 = 该路线首个点; 终点 = 路线终点篝火所在的段末尾
+                int biomeOrdinal = route - 1;
+                int first = -1;
+                int lastOfBiome = -1;
+                for (int i = 0; i <= last; i++)
+                {
+                    if (pts[i].BiomeOrdinal != biomeOrdinal) continue;
+                    if (first < 0) first = i;
+                    lastOfBiome = i;
+                }
+                if (first < 0) return false;
+
+                startIndex = first;
+                // 迷你跑只有 1 个群系段, 段终点就是该段最后一个点的下一个点
+                endIndex = lastOfBiome;
+                return endIndex >= startIndex;
+            }
+            catch (Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 解析路线进度点区间失败: " + ex.Message);
+                return false;
+            }
+        }
+
         // 查询"群系出现序号 ordinal 对应的进度点区间"。
         public bool TryGetBiomePointSpan(int biomeOrdinal, out int startIndex, out int count)
         {

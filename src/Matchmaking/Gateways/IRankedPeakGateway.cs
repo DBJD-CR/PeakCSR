@@ -56,6 +56,13 @@ namespace PeakCSR
         string GetSegmentBiomeName(int levelIndex, int segmentIndex);
         // 按"群系在本座山里的出现序号"(0 起) 查询该群系占用的进度点区间。
         bool TryGetBiomePointSpan(int biomeOrdinal, out int startIndex, out int count);
+
+        // 读取当前山体的真实进度点 (含段名 title 与世界坐标)
+        ProgressPointInfo[] GetProgressPoints();
+        // 查询"某段终点进度点索引"对应的出口篝火 Z 坐标
+        bool TryGetCampfireZ(int boundaryPointIndex, out float z);
+        // 本局路线的进度点区间 (route 为 1-based 群系序号, 0 表示全山)
+        bool TryResolveRouteSpanFor(int route, out int startIndex, out int endIndex);
         int PickRandomAuthenticLevel(int excludeIndex);
         int SprintBiomeCount();
         List<long> GetLiveSplits(string steamId);
