@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using HarmonyLib;
+using RankedPeak.Services;
 using RankedPeak.Ui.Menu;
 using TMPro;
 using UnityEngine;
@@ -9,7 +10,7 @@ using UnityEngine.UI;
 
 namespace PeakCSR
 {
-    // 在主菜单右侧 RANKED 路牌柱原生追加一块 PCSR 1v1 木牌
+    // 在主菜单右侧 RANKED 路牌柱原生追加一块 PCSR 1v1 木牌 (原样迁移, 只改订阅源)
     [HarmonyPatch(typeof(MainMenuMainPage), "Start")]
     public static class MainMenuIntegration
     {
@@ -39,7 +40,7 @@ namespace PeakCSR
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[PeakCSR] PCSR 木牌注入器挂载失败: " + ex.Message);
+                PcsrLog.LogWarning("[PeakCSR] PCSR 木牌注入器挂载失败: " + ex.Message);
             }
         }
 
@@ -96,7 +97,7 @@ namespace PeakCSR
 
             EnsureUpdater(clone);
             RefreshSignLabel();
-            Plugin.Log.LogInfo("[PeakCSR] 已在主菜单右侧路牌柱追加原生 PCSR 1v1 木牌！");
+            PcsrLog.LogInfo("[PeakCSR] 已在主菜单右侧路牌柱追加原生 PCSR 1v1 木牌！");
             return true;
         }
 
@@ -142,18 +143,20 @@ namespace PeakCSR
             Button btn = _signButton;
             if (btn == null) return;
 
-            MatchController mc = MatchController.Instance;
-            int elo = EloCalculator.CurrentElo;
-            string tierKey = EloCalculator.GetVanillaTierKey(elo);
+            MatchCoordinator mc = MatchCoordinator.Instance;
+            int elo = 1000;
+            PlayerProfileBridge profile = mc != null ? mc.Profile : null;
+            if (profile != null) elo = profile.CurrentElo;
+            string tierKey = TierCatalog.GetVanillaTierKey(elo);
 
             string label;
             if (mc != null && mc.State != CsMatchState.Idle && mc.State != CsMatchState.Finished)
             {
-                label = CsrLoc.T("sign.queuing", MatchController.FormatElapsed(mc.QueueElapsedSeconds));
+                label = CsrLoc.T("sign.queuing", CsrFormat.FormatElapsed(mc.QueueElapsedSeconds));
             }
             else
             {
-                string tierHex = EloCalculator.GetTierHexColorOnLight(elo);
+                string tierHex = TierCatalog.GetTierHexColorOnLight(elo);
                 label = CsrLoc.T("sign.idle", tierHex, elo.ToString("N0"));
             }
 
@@ -232,7 +235,7 @@ namespace PeakCSR
                     }
                     catch (Exception ex)
                     {
-                        Plugin.Log.LogWarning("[PeakCSR] PCSR 木牌注入异常: " + ex.Message);
+                        PcsrLog.LogWarning("[PeakCSR] PCSR 木牌注入异常: " + ex.Message);
                         _routine = null;
                         yield break;
                     }
@@ -246,7 +249,7 @@ namespace PeakCSR
                     yield return null;
                 }
 
-                Plugin.Log.LogWarning("[PeakCSR] 未找到 RANKED 路牌柱, PCSR 木牌注入跳过 (仍可按 F10 打开面板)。");
+                PcsrLog.LogWarning("[PeakCSR] 未找到 RANKED 路牌柱, PCSR 木牌注入跳过 (仍可按 F10 打开面板)。");
                 _routine = null;
             }
 
@@ -265,16 +268,16 @@ namespace PeakCSR
         {
             private void OnEnable()
             {
-                EloCalculator.OnRatingChanged += RefreshSignLabel;
-                MatchController.OnStateChanged += RefreshSignLabel;
+                EventBus.OnRatingChanged += RefreshSignLabel;
+                EventBus.OnMatchStateChanged += RefreshSignLabel;
                 CsrLoc.OnLanguageChanged += RefreshSignLabel;
                 RefreshSignLabel();
             }
 
             private void OnDisable()
             {
-                EloCalculator.OnRatingChanged -= RefreshSignLabel;
-                MatchController.OnStateChanged -= RefreshSignLabel;
+                EventBus.OnRatingChanged -= RefreshSignLabel;
+                EventBus.OnMatchStateChanged -= RefreshSignLabel;
                 CsrLoc.OnLanguageChanged -= RefreshSignLabel;
             }
         }
