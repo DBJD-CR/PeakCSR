@@ -81,26 +81,26 @@ namespace PeakCSR
         {
             if (IsRunning)
             {
-                Plugin.Log.LogInfo("[PeakCSR] 日志窗口已在运行中。");
+                PcsrLog.LogInfo("[PeakCSR] 日志窗口已在运行中。");
                 return;
             }
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
             {
-                Plugin.Log.LogWarning("[PeakCSR] 日志窗口仅支持 Windows。");
+                PcsrLog.LogWarning("[PeakCSR] 日志窗口仅支持 Windows。");
                 return;
             }
 
             string logPath = LogFilePath;
             if (string.IsNullOrEmpty(logPath))
             {
-                Plugin.Log.LogWarning("[PeakCSR] 找不到 BepInEx 日志文件路径, 无法打开日志窗口。");
+                PcsrLog.LogWarning("[PeakCSR] 找不到 BepInEx 日志文件路径, 无法打开日志窗口。");
                 return;
             }
             if (!File.Exists(logPath))
             {
                 // 文件可能还没被 BepInEx 创建, 稍后重试
                 _nextLaunchAttempt = Time.realtimeSinceStartup + 5f;
-                Plugin.Log.LogInfo("[PeakCSR] 日志文件尚未生成, 5 秒后重试: " + logPath);
+                PcsrLog.LogInfo("[PeakCSR] 日志文件尚未生成, 5 秒后重试: " + logPath);
                 return;
             }
 
@@ -112,7 +112,7 @@ namespace PeakCSR
                 string script = WriteTailScript(gamePid, logPath, filterPeakCsr);
                 if (script == null)
                 {
-                    Plugin.Log.LogWarning("[PeakCSR] 写入日志窗口脚本失败, 放弃打开。");
+                    PcsrLog.LogWarning("[PeakCSR] 写入日志窗口脚本失败, 放弃打开。");
                     return;
                 }
 
@@ -127,7 +127,7 @@ namespace PeakCSR
                 int pid;
                 if (!CreateDetachedProcess(psExe, args, title, workingDir, out pid))
                 {
-                    Plugin.Log.LogWarning("[PeakCSR] 启动日志窗口进程失败, Win32 错误: " + Marshal.GetLastWin32Error());
+                    PcsrLog.LogWarning("[PeakCSR] 启动日志窗口进程失败, Win32 错误: " + Marshal.GetLastWin32Error());
                     return;
                 }
 
@@ -142,11 +142,11 @@ namespace PeakCSR
                     _tailProcess = null;
                 }
 
-                Plugin.Log.LogInfo("[PeakCSR] 已打开实时日志窗口: " + title + " (PID " + pid + ") -> " + logPath);
+                PcsrLog.LogInfo("[PeakCSR] 已打开实时日志窗口: " + title + " (PID " + pid + ") -> " + logPath);
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[PeakCSR] 打开日志窗口失败: " + ex.Message);
+                PcsrLog.LogWarning("[PeakCSR] 打开日志窗口失败: " + ex.Message);
             }
         }
 
@@ -286,7 +286,7 @@ finally {
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[PeakCSR] 生成日志窗口脚本失败: " + ex.Message);
+                PcsrLog.LogWarning("[PeakCSR] 生成日志窗口脚本失败: " + ex.Message);
                 return null;
             }
         }
