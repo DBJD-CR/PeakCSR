@@ -40,7 +40,8 @@ namespace PeakCSR
                 bool stableInRoom = session.OpponentJoinedTime > 0f && Time.realtimeSinceStartup - session.OpponentJoinedTime > 3f;
                 bool oppIdle = IsOpponentStillJoined(_gw);
                 // 宽限期从"对手到达与连接就绪中较晚的那个"起算
-                float graceStart = session.LiveConnectedSince;
+                float liveSince = _gw.LiveConnected ? session.LiveConnectedSince : -1f;
+                float graceStart = liveSince;
                 if (session.OpponentJoinedTime > graceStart) graceStart = session.OpponentJoinedTime;
                 bool graceExpired = connReady
                     && graceStart > 0f
