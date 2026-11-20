@@ -19,7 +19,19 @@ function Copy-WithRetry {
     }
 }
 $BinDir      = Join-Path $ProjectRoot "bin"
-$ProfileRoot = "C:\Users\ASUS\AppData\Roaming\Thunderstore Mod Manager\DataFolder\PEAK\profiles\RANKED"
+# Profile 路径可被环境变量 PEAK_PROFILE_DIR 或 local.props 覆盖 (csproj 同步该逻辑)
+$ProfileRoot = $env:PEAK_PROFILE_DIR
+if ([string]::IsNullOrWhiteSpace($ProfileRoot)) {
+    $propsFile = Join-Path $ProjectRoot "local.props"
+    if (Test-Path $propsFile) {
+        Get-Content $propsFile | ForEach-Object {
+            if ($_ -match "<ProfileDir>(.+)</ProfileDir>") { $ProfileRoot = $Matches[1].Trim() }
+        }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($ProfileRoot)) {
+    $ProfileRoot = "C:\Users\ASUS\AppData\Roaming\Thunderstore Mod Manager\DataFolder\PEAK\profiles\RANKED"
+}
 
 # 作者名改为个人 (Thunderstore 显示为 "PeakCSR vX by DBJD-CR")
 $AuthorName  = "DBJD-CR"

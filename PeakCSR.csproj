@@ -9,12 +9,31 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
+  <!-- 路径可通过 local.props (gitignore) 或环境变量覆盖, 不再硬编码本地绝对路径 -->
   <PropertyGroup>
+    <GameManagedDir Condition="'$(GameManagedDir)' == ''">$(PEAK_MANAGED_DIR)</GameManagedDir>
+    <ProfileDir Condition="'$(ProfileDir)' == ''">$(PEAK_PROFILE_DIR)</ProfileDir>
+    <GameManagedDir Condition="'$(GameManagedDir)' == '' and Exists('local.props')">$(GameManagedDirFromProps)</GameManagedDir>
+  </PropertyGroup>
+
+  <!-- 本地可选覆盖文件 (加入 .gitignore): 定义 GameManagedDir / ProfileDir -->
+  <Import Project="local.props" Condition="Exists('local.props')" />
+
+  <PropertyGroup Condition="'$(GameManagedDir)' == ''">
     <GameManagedDir>E:\steam\steamapps\common\PEAK\PEAK_Data\Managed</GameManagedDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ProfileDir)' == ''">
     <ProfileDir>C:\Users\ASUS\AppData\Roaming\Thunderstore Mod Manager\DataFolder\PEAK\profiles\RANKED</ProfileDir>
+  </PropertyGroup>
+
+  <PropertyGroup>
     <BepInExCoreDir>$(ProfileDir)\BepInEx\core</BepInExCoreDir>
     <RankedPluginDir>$(ProfileDir)\BepInEx\plugins\PeakCode-PEAK_RANKED</RankedPluginDir>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="shared\rating-rules.json" LogicalName="PeakCSR.rating-rules.json" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="BepInEx">
@@ -98,4 +117,16 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+
+  <!-- 版本号单一事实源: 从 manifest.json 读取并生成 PluginVersionConstant (生成脚本见 tools/gen-version.ps1) -->
+  <Target Name="GeneratePluginVersion" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <ManifestFile>$(MSBuildProjectDirectory)\manifest.json</ManifestFile>
+      <GeneratedFile>$(MSBuildProjectDirectory)\src\Boot\PluginVersion.g.cs</GeneratedFile>
+    </PropertyGroup>
+    <PropertyGroup>
+      <GenCmd>powershell -NoProfile -ExecutionPolicy Bypass -Command ". '$(MSBuildProjectDirectory)\tools\gen-version.ps1' -Manifest '$(ManifestFile)' -Output '$(GeneratedFile)'"</GenCmd>
+    </PropertyGroup>
+    <Exec Condition="Exists('$(ManifestFile)')" Command="$(GenCmd)" />
+  </Target>
 </Project>
