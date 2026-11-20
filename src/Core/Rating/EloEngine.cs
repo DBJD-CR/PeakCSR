@@ -136,9 +136,8 @@ namespace PeakCSR
                 bonus = (relief + gapTerm) * scale;
             }
 
-            // 必须用 AwayFromZero (.5 进位): Worker 用 Math.round, .NET 默认是银行家舍入 (.5 取偶),
-            // 两边不一致会让同一局的本地加分与云端结算差 1 分 (例如 4.5 -> 本地 4 / 云端 5)
-            int rounded = (int)Math.Round(bonus * antiBoostWeight, MidpointRounding.AwayFromZero);
+            // 与 JS Math.round 完全同口径
+            int rounded = JsRound(bonus * antiBoostWeight);
             int maxCap = isPlacement ? pc.Cap.Placement : pc.Cap.Regular;
             if (rounded < -maxCap) rounded = -maxCap;
             if (rounded > maxCap) rounded = maxCap;
@@ -163,8 +162,8 @@ namespace PeakCSR
             out int baseDeltaOut)
         {
             double expected = 1.0 / (1.0 + Math.Pow(10.0, (opponentElo - myElo) / R.Elo.ScaleDenominator));
-            // 同上: 与 Worker 的 Math.round 对齐
-            int rawBase = (int)Math.Round(kFactor * (actualScore - expected) * weightFactor, MidpointRounding.AwayFromZero);
+            // 同上: 与 Worker 的 Math.round 对齐 (含负数半值向正无穷)
+            int rawBase = JsRound(kFactor * (actualScore - expected) * weightFactor);
 
             if (antiBoostWeight > 0.01)
             {
@@ -197,6 +196,13 @@ namespace PeakCSR
             }
 
             return total;
+        }
+
+        // JS Math.round 的等价实现: floor(x + 0.5)。
+        // 只用于需要与 Worker 逐分对齐的取整点, 不要拿它替换业务里明确要求四舍五入的地方。
+        private static int JsRound(double value)
+        {
+            return (int)Math.Floor(value + 0.5);
         }
     }
 }
