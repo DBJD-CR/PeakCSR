@@ -57,6 +57,15 @@ namespace PeakCSR
         public void RespondVote(MatchSession session, bool accept)
         {
             if (!session.OppRerollVoteActive) return;
+            // 截止后同帧内的点击仍然会走到这里 (flag 只在 Tick 里清), 自己再判一次超时
+            if (Time.realtimeSinceStartup >= session.RerollVoteDeadline)
+            {
+                session.OppRerollVoteActive = false;
+                session.MyRerollVoteActive = false;
+                session.StatusMessage = CsrLoc.T("status.reroll_timeout");
+                session.Notify();
+                return;
+            }
             session.OppRerollVoteActive = false;
 
             if (!accept)
@@ -74,8 +83,13 @@ namespace PeakCSR
 
         public void ExecuteAgreedReroll(MatchSession session, int newSeed, int newLevelIndex, int newRoute)
         {
-            session.MyRerollVoteActive = false;
-            session.OppRerollVoteActive = false;
+            session.SwitchingRerollRoom = true;
+
+            // 新一局从零开始统计进度与分段
+            session.ResetForNewRace();
+            session.Splits.Clear();
+            session.LiveSplitsFallback.Clear();
+
             session.Seed = newSeed;
             session.LevelIndex = newLevelIndex;
             session.Route = newRoute;
@@ -86,10 +100,17 @@ namespace PeakCSR
             _gw.PushSystemChat(CsrLoc.T("chat.reroll.accepted", session.LevelIndex, biomeLabel));
 
             RankedPeak.Services.RaceInfo current = _gw.CurrentRace;
-            if (_gw.ServiceAvailable == false || current == null) return;
+            if (_gw.ServiceAvailable == false || current == null)
+            {
+                // 拿不到房间就没什么可换的: 解除换房期拦截, 让当前这局照常进行
+                session.SwitchingRerollRoom = false;
+                return;
+            }
 
             if (current.Status == "lobby")
             {
+                // 还在 lobby: 直接改房间配置, 房间没换, 立刻解除拦截
+                session.SwitchingRerollRoom = false;
                 if (_gw.IsHost)
                 {
                     _gw.UpdateRaceConfig(session.Seed, session.LevelIndex, session.Ascent, session.Route,
@@ -131,6 +152,41 @@ namespace PeakCSR
             session.Notify();
         }
 
+        // 换房是异步的, 失败必须能自己爬起来
+        private const int MaxRerollJoinAttempts = 3;
+
+        private void RetryRerollJoin(MatchSession session)
+        {
+            if (session.RerollJoinAttempts >= MaxRerollJoinAttempts)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 换图新房间连续 " + session.RerollJoinAttempts + " 次加入失败，放弃并回到搜索队列。");
+                session.SwitchingRerollRoom = false;
+                session.PendingRerollJoinCode = "";
+                session.RerollJoinAttempts = 0;
+                session.State = CsMatchState.SearchingLobby;
+                session.NextLobbyPollTime = 0f;
+                session.StatusMessage = CsrLoc.T("status.reroll_failed_requeue");
+                session.Notify();
+                return;
+            }
+            if (Time.realtimeSinceStartup > session.PendingRerollJoinDeadline)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 换图新房间加入超过 20 秒仍未成功，放弃并回到搜索队列。");
+                session.SwitchingRerollRoom = false;
+                session.PendingRerollJoinCode = "";
+                session.RerollJoinAttempts = 0;
+                session.State = CsMatchState.SearchingLobby;
+                session.NextLobbyPollTime = 0f;
+                session.StatusMessage = CsrLoc.T("status.reroll_failed_requeue");
+                session.Notify();
+                return;
+            }
+            PcsrLog.LogInfo("[PeakCSR] 重试加入换图新房间 [" + session.PendingRerollJoinCode + "] (第 "
+                + (session.RerollJoinAttempts + 1) + " 次)。");
+            JoinRerollRoom(session, session.PendingRerollJoinCode,
+                session.PendingRerollSeed, session.PendingRerollLevel, session.PendingRerollRoute);
+        }
+
         // 房主把新房号与参数广播给对手 (重复发几次提高到达率, 服务端会去重)
         public void BroadcastRerollRoom(MatchSession session, string newCode)
         {
@@ -146,6 +202,10 @@ namespace PeakCSR
             session.PendingRerollSeed = seed;
             session.PendingRerollLevel = levelIndex;
             session.PendingRerollRoute = route;
+            if (session.PendingRerollJoinDeadline <= 0f)
+            {
+                session.PendingRerollJoinDeadline = Time.realtimeSinceStartup + 20f;
+            }
 
             if (_gw.ServiceAvailable == false) return;
             if (!string.Equals(session.InviteCode, newCode, System.StringComparison.OrdinalIgnoreCase))
@@ -159,20 +219,24 @@ namespace PeakCSR
             PcsrLog.LogInfo("[PeakCSR] 收到换图新房号 [" + newCode + "]，正在加入...");
             _gw.JoinRace(newCode, newRace =>
             {
-                session.SwitchingRerollRoom = false;
                 session.PendingRerollJoinCode = "";
+                session.RerollJoinAttempts = 0;
                 session.StrictRulesetJoin = false;
                 if (newRace != null)
                 {
                     session.Splits.Clear();
                     _owner.OnRaceJoined(session, newRace);
+                    // 只有真正进了新房才解除换房期拦截 (在里面再清, 避免提前允许结算旧房数据)
+                    session.SwitchingRerollRoom = false;
                 }
+                session.Notify();
             }, err =>
             {
-                session.SwitchingRerollRoom = false;
-                PcsrLog.LogWarning("[PeakCSR] 加入换图新房间失败: " + err);
-                session.StatusMessage = CsrLoc.T("status.error", err);
+                session.RerollJoinAttempts++;
+                PcsrLog.LogWarning("[PeakCSR] 加入换图新房间失败 (第 " + session.RerollJoinAttempts + " 次): " + err);
+                session.StatusMessage = CsrLoc.T("status.reroll_retrying", session.RerollJoinAttempts);
                 session.Notify();
+                RetryRerollJoin(session);
             });
             session.Notify();
         }
