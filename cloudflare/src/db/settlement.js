@@ -3,7 +3,8 @@
 
 import {
   getModeMultiplier, getMinWinDelta, getMaxLossDelta,
-  computeProgressModifier, computeSettlement, evaluateAntiBoostWeight
+  computeProgressModifier, computeSettlement, evaluateAntiBoostWeight,
+  RULES
 } from "../domain/rating.js";
 import { modeColumns } from "./players.js";
 
@@ -55,11 +56,16 @@ export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerN
   if (winWeight > 0.01) winDelta = Math.max(winMin, winDelta);
   if (loseWeight > 0.01) loseDelta = Math.max(loseMax, Math.min(0, loseDelta));
 
-  const newWinElo = Math.max(100, winPlayer.elo + winDelta);
+  // 分数钳制必须走规则
+  const clampMin = RULES.elo.clampMin;
+  const clampMax = RULES.elo.clampMax;
+  const clampElo = (v) => Math.max(clampMin, Math.min(clampMax, v));
+
+  const newWinElo = clampElo(winPlayer.elo + winDelta);
   const newWinPeak = Math.max(winPlayer.peak_elo, newWinElo);
   const newWinStreak = winPlayer.streak >= 0 ? winPlayer.streak + 1 : 1;
 
-  const newLoseElo = Math.max(100, losePlayer.elo + loseDelta);
+  const newLoseElo = clampElo(losePlayer.elo + loseDelta);
   const newLosePeak = Math.max(losePlayer.peak_elo, newLoseElo);
   const newLoseStreak = losePlayer.streak <= 0 ? losePlayer.streak - 1 : -1;
 

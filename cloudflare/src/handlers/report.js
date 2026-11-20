@@ -73,9 +73,11 @@ export async function handleMatchReport(body, env) {
 
   const now = Date.now();
 
-  // 先建双方档案: 作废局的历史行要读双方的"赛前 ELO", 玩家行不存在的话历史会永久记成 0 -> 0
+  // 上报方档案先建: 签名已校验, 这一定是本人
   await getOrCreatePlayer(env.DB, reporterId, reporterName, reporterSeedElo);
-  await getOrCreatePlayer(env.DB, opponentId, opponentName, opponentSeedElo);
+  if (isVoid) {
+    await getOrCreatePlayer(env.DB, opponentId, opponentName, opponentSeedElo);
+  }
 
   await env.DB.prepare(
     `INSERT OR REPLACE INTO match_reports
@@ -92,14 +94,21 @@ export async function handleMatchReport(body, env) {
   if (isVoid) {
     await recordVoidSettlement(env.DB, key, inviteCode, seed, reporterId, opponentId, levelIndex, ascent, format, route,
       durationMs, reporterProgress, opponentProgress, now, "client_void:" + (voidReason || "unknown"));
+
+    // 回读"库里真正的那一行"再应答
+    const committed = await env.DB.prepare(
+      "SELECT * FROM settled_matches WHERE match_key = ?"
+    ).bind(key).first();
+    const rowIsVoid = !committed || !!committed.is_void;
     const p = await getOrCreatePlayer(env.DB, reporterId, reporterName, reporterSeedElo);
+    const rowIsWinner = !!committed && reporterId === committed.winner_steam_id;
     return jsonResp({
       ok: true,
-      status: "settled_void",
-      verifyMethod: "client_void",
-      isVoid: true,
+      status: rowIsVoid ? "settled_void" : "already_settled",
+      verifyMethod: committed ? committed.verify_method : "client_void",
+      isVoid: rowIsVoid,
       elo: p.elo,
-      delta: 0
+      delta: rowIsVoid ? 0 : (rowIsWinner ? committed.winner_delta : committed.loser_delta)
     }, 200);
   }
 
@@ -112,21 +121,28 @@ export async function handleMatchReport(body, env) {
   let verifyMethod = null;
   let winnerProgress = 0;
   let loserProgress = 0;
+  // 落库用时必须是"胜者的完赛用时"
+  let settledDurationMs = durationMs;
 
-  // 共识要求双方报告互指
+  // 共识要求双方报告互指, 且计分相关的赛制参数必须一致
   const reciprocal = oppReport
     && !oppReport.is_void
     && oppReport.winner_steam_id === winnerId
-    && oppReport.opponent_steam_id === reporterId;
+    && oppReport.opponent_steam_id === reporterId
+    && Number(oppReport.format) === format
+    && Number(oppReport.ascent) === ascent;
   if (reciprocal) {
     verifiedWinnerId = winnerId;
     verifyMethod = "dual_client_consensus";
     if (winnerId === reporterId) {
       winnerProgress = reporterProgress;
       loserProgress = opponentProgress;
+      settledDurationMs = durationMs;
     } else {
       winnerProgress = opponentProgress;
       loserProgress = reporterProgress;
+      // 本上报方是败者: 用时取对手 (胜者) 那条上报的 durationMs
+      settledDurationMs = Number(oppReport.duration_ms) || durationMs;
     }
   } else {
     // 验证通道 B: 向原版 RankedPeak 后端交叉验证
@@ -138,9 +154,12 @@ export async function handleMatchReport(body, env) {
       if (winnerId === reporterId) {
         winnerProgress = reporterProgress;
         loserProgress = opponentProgress;
+        settledDurationMs = durationMs;
       } else {
         winnerProgress = opponentProgress;
         loserProgress = reporterProgress;
+        // 上游交叉验证时不一定能拿到对手上报行, 只能保守沿用本地上报用时
+        settledDurationMs = durationMs;
       }
     }
   }
@@ -159,12 +178,13 @@ export async function handleMatchReport(body, env) {
   const winnerSeedElo = verifiedWinnerId === reporterId ? reporterSeedElo : opponentSeedElo;
   const loserSeedElo = verifiedWinnerId === reporterId ? opponentSeedElo : reporterSeedElo;
 
+
   let settlement;
   try {
     settlement = await settleEloOnDb(
       env.DB, key, inviteCode, seed, verifiedWinnerId, winnerName, winnerSeedElo,
       loserId, loserName, loserSeedElo,
-      levelIndex, ascent, format, route, durationMs, winnerProgress, loserProgress,
+      levelIndex, ascent, format, route, settledDurationMs, winnerProgress, loserProgress,
       verifyMethod, now
     );
   } catch (err) {
