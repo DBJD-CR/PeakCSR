@@ -113,7 +113,8 @@ namespace PeakCSR
         public void ApplyRatedResult(McsrRuleFormat format, int ascent, double actualScore, int delta)
         {
             Elo += delta;
-            if (Elo < 100) Elo = 100;
+            if (Elo < EloEngine.EloClampMin) Elo = EloEngine.EloClampMin;
+            if (Elo > EloEngine.EloClampMax) Elo = EloEngine.EloClampMax;
             if (Elo > PeakElo) PeakElo = Elo;
 
             if (actualScore > 0.75)
@@ -142,7 +143,8 @@ namespace PeakCSR
         public void ApplyUnratedResult(int delta)
         {
             Elo += delta;
-            if (Elo < 100) Elo = 100;
+            if (Elo < EloEngine.EloClampMin) Elo = EloEngine.EloClampMin;
+            if (Elo > EloEngine.EloClampMax) Elo = EloEngine.EloClampMax;
             if (Elo > PeakElo) PeakElo = Elo;
         }
 
@@ -176,23 +178,27 @@ namespace PeakCSR
         // 云端权威分数覆盖 (只动分数, 不动战绩口径)
         public void ApplyCloudAuthoritativeElo(int cloudElo)
         {
-            Elo = Math.Max(100, Math.Min(5000, cloudElo));
+            Elo = Math.Max(EloEngine.EloClampMin, Math.Min(EloEngine.EloClampMax, cloudElo));
             if (Elo > PeakElo) PeakElo = Elo;
         }
 
-        // 云端权威档案覆盖 (含分赛制战绩), 与旧 ApplyCloudAuthoritativeState 行为一致
+        // 云端权威档案覆盖 (含分赛制战绩)
+        // draws: 云端平局数, 传 -1 表示未拿到权威档案 (本地计分赛不会产生平局, 保留现值)
         public void ApplyCloudAuthoritativeState(
-            int elo, int peak, int wins, int losses, int streak,
+            int elo, int peak, int wins, int losses, int draws, int streak,
             int winsAllPeak, int lossesAllPeak,
             int winsHardcore, int lossesHardcore,
             int winsSprint, int lossesSprint,
             int favoriteMap, int favoriteAscent, int favoriteFormat,
             int biomeCount)
         {
-            Elo = Math.Max(100, Math.Min(5000, elo));
+            Elo = Math.Max(EloEngine.EloClampMin, Math.Min(EloEngine.EloClampMax, elo));
             PeakElo = Math.Max(Elo, peak);
             Wins = Math.Max(0, wins);
             Losses = Math.Max(0, losses);
+            // 云端 wins/losses 被重写时, 本地残留的 draws 会让 TotalGames 多算一局,
+            // 使定级赛提前一局结束, 所以必须与胜负一起同步
+            if (draws >= 0) Draws = Math.Max(0, draws);
             Streak = streak;
 
             Modes[0] = new ModeRecord(Math.Max(0, winsAllPeak), Math.Max(0, lossesAllPeak),
@@ -205,17 +211,6 @@ namespace PeakCSR
             if (favoriteMap >= 0 && favoriteMap < biomeCount) FavoriteMap = favoriteMap;
             if (favoriteAscent > -900) FavoriteAscent = favoriteAscent;
             if (favoriteFormat >= 0) FavoriteFormat = favoriteFormat;
-
-            // 云端同样会把推导用的统计列带回来, 但场次口径以本地为准, 这里只兜底灌入
-            int ascIdx = RoomMagicCodec.ClampAscent(favoriteAscent) + 1;
-            if (ascIdx >= 0 && ascIdx < AscentGames.Length && AscentGames[ascIdx] == 0 && favoriteAscent > -900)
-            {
-                AscentGames[ascIdx] = 1;
-            }
-            if (favoriteFormat >= 0 && favoriteFormat <= 2 && FormatGames[favoriteFormat] == 0)
-            {
-                FormatGames[favoriteFormat] = 1;
-            }
         }
 
         // 本地存档签名篡改时清零 (与旧行为一致: 回到初始分并清空统计)
