@@ -96,6 +96,22 @@ namespace PeakCSR
             }
         }
 
+        // 重置为默认档之前先留一份带时间戳的备份
+        private static void BackupBeforeReset()
+        {
+            if (!File.Exists(SavePath)) return;
+            string stamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+            string backupPath = SavePath + ".bak_" + stamp;
+            int suffix = 1;
+            while (File.Exists(backupPath))
+            {
+                backupPath = SavePath + ".bak_" + stamp + "_" + suffix;
+                suffix++;
+            }
+            File.Copy(SavePath, backupPath, false);
+            PcsrLog.LogWarning("[PeakCSR] 重置前已备份旧存档: " + backupPath);
+        }
+
         private void LoadFromJson(PlayerRecord record, int defaultElo)
         {
             string json = File.ReadAllText(SavePath);
@@ -124,6 +140,8 @@ namespace PeakCSR
             {
                 PcsrLog.LogWarning("[PeakCSR] 本地存档版本号为 " + dto.SchemaVersion + " (期望 "
                     + CurrentSchemaVersion + ")，旧格式不再迁移，已重置为初始分数。");
+                // Save 走 File.Replace(..., null), 原文件内容不会保留, 必须先备份
+                BackupBeforeReset();
                 record.ResetToDefault(defaultElo);
                 Save(record);
                 return;
