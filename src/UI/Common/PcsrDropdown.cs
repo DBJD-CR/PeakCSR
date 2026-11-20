@@ -1,14 +1,14 @@
 using System;
 using System.Collections.Generic;
+using RankedPeak.Ui.Native;
 using TMPro;
 using UnityEngine;
-using RankedPeak.Ui.Native;
 using UnityEngine.Events;
 using UnityEngine.UI;
 
 namespace PeakCSR
 {
-    // 轻量下拉框
+    // 轻量下拉框 (原 src/PcsrDropdown.cs 原样迁移至 UI/Common, 视觉与行为零变化)
     // RANKED 没有现成的 TMP_Dropdown 可复用, 这里用原生 UI 手搓一个:
     // 闭合态就是一个 pill 按钮, 展开时在按钮下方铺一层列表, 点选项回填并收起。
     // 不用 TMP_Dropdown: 它要求完整的 Template/Viewport/Content 层级, 还自带一层
