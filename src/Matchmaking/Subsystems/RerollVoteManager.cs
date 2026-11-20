@@ -27,6 +27,23 @@ namespace PeakCSR
                 PcsrLog.LogInfo("[PeakCSR] 换图投票超时（30秒），继续当前比赛。");
                 session.Notify();
             }
+
+            // 换房加入的 20 秒 deadline 在这里也兜一层
+            if (session.SwitchingRerollRoom
+                && !_gw.IsHost
+                && session.PendingRerollJoinDeadline > 0f
+                && Time.realtimeSinceStartup > session.PendingRerollJoinDeadline)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 换图等待超时，未收到或未能加入新房，已回到搜索队列。");
+                session.SwitchingRerollRoom = false;
+                session.PendingRerollJoinCode = "";
+                session.PendingRerollJoinDeadline = -1f;
+                session.RerollJoinAttempts = 0;
+                session.State = CsMatchState.SearchingLobby;
+                session.NextLobbyPollTime = 0f;
+                session.StatusMessage = CsrLoc.T("status.reroll_failed_requeue");
+                session.Notify();
+            }
         }
 
         // 赛中发起 30 秒双人投票换图
@@ -83,12 +100,23 @@ namespace PeakCSR
 
         public void ExecuteAgreedReroll(MatchSession session, int newSeed, int newLevelIndex, int newRoute)
         {
+            // 先看能不能换: 拿不到房间时直接放弃, 不清掉进度/分段/峰值
+            RankedPeak.Services.RaceInfo current = _gw.CurrentRace;
+            if (_gw.ServiceAvailable == false || current == null)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 换图不可用 (服务或房间缺失)，保持当前对局不变。");
+                session.MyRerollVoteActive = false;
+                session.OppRerollVoteActive = false;
+                session.StatusMessage = CsrLoc.T("status.reroll_failed_requeue");
+                session.Notify();
+                return;
+            }
+
             session.SwitchingRerollRoom = true;
 
-            // 新一局从零开始统计进度与分段
+            // 新一局从零开始统计进度与分段 (换图后路线区间也要重新解析)
             session.ResetForNewRace();
             session.Splits.Clear();
-            session.LiveSplitsFallback.Clear();
 
             session.Seed = newSeed;
             session.LevelIndex = newLevelIndex;
@@ -98,14 +126,6 @@ namespace PeakCSR
             session.StatusMessage = CsrLoc.T("status.reroll_passed", session.LevelIndex, biomeLabel);
             PcsrLog.LogInfo("[PeakCSR] 双方同意换图！新地图: #" + session.LevelIndex + " (" + biomeLabel + "), 新种子: " + session.Seed);
             _gw.PushSystemChat(CsrLoc.T("chat.reroll.accepted", session.LevelIndex, biomeLabel));
-
-            RankedPeak.Services.RaceInfo current = _gw.CurrentRace;
-            if (_gw.ServiceAvailable == false || current == null)
-            {
-                // 拿不到房间就没什么可换的: 解除换房期拦截, 让当前这局照常进行
-                session.SwitchingRerollRoom = false;
-                return;
-            }
 
             if (current.Status == "lobby")
             {
@@ -130,6 +150,7 @@ namespace PeakCSR
                 _gw.CreateRace(session.Seed, session.LevelIndex, session.Ascent, session.Route, false,
                     newRace =>
                     {
+                        if (!IsCurrent(session)) return;
                         session.SwitchingRerollRoom = false;
                         if (newRace == null)
                         {
@@ -140,7 +161,11 @@ namespace PeakCSR
                         BroadcastRerollRoom(session, newRace.InviteCode);
                         _owner.OnRaceJoined(session, newRace);
                     },
-                    err => OnLobbyError(session, err));
+                    err =>
+                    {
+                        if (!IsCurrent(session)) return;
+                        OnLobbyError(session, err);
+                    });
             }
             else
             {
@@ -198,6 +223,7 @@ namespace PeakCSR
         // 加入方收到房主的新房号后, 主动加入
         public void JoinRerollRoom(MatchSession session, string newCode, int seed, int levelIndex, int route)
         {
+            if (!IsCurrent(session)) return;
             session.PendingRerollJoinCode = newCode;
             session.PendingRerollSeed = seed;
             session.PendingRerollLevel = levelIndex;
@@ -207,19 +233,29 @@ namespace PeakCSR
                 session.PendingRerollJoinDeadline = Time.realtimeSinceStartup + 20f;
             }
 
-            if (_gw.ServiceAvailable == false) return;
+            // 先把切换标记立起来: 服务不可用时不直接 return
+            session.SwitchingRerollRoom = true;
+            if (_gw.ServiceAvailable == false)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 换房请求时服务不可用，等待自动重试。");
+                session.StatusMessage = CsrLoc.T("status.reroll_waiting_room");
+                session.Notify();
+                return;
+            }
+
             if (!string.Equals(session.InviteCode, newCode, System.StringComparison.OrdinalIgnoreCase))
             {
                 // 先退出旧房, 再进新房, 避免两个房间互相覆盖状态
                 _gw.LeaveRace();
             }
 
-            session.SwitchingRerollRoom = true;
             session.StatusMessage = CsrLoc.T("status.reroll_joining_room", newCode);
             PcsrLog.LogInfo("[PeakCSR] 收到换图新房号 [" + newCode + "]，正在加入...");
             _gw.JoinRace(newCode, newRace =>
             {
+                if (!IsCurrent(session)) return;
                 session.PendingRerollJoinCode = "";
+                session.PendingRerollJoinDeadline = -1f;
                 session.RerollJoinAttempts = 0;
                 session.StrictRulesetJoin = false;
                 if (newRace != null)
@@ -232,6 +268,7 @@ namespace PeakCSR
                 session.Notify();
             }, err =>
             {
+                if (!IsCurrent(session)) return;
                 session.RerollJoinAttempts++;
                 PcsrLog.LogWarning("[PeakCSR] 加入换图新房间失败 (第 " + session.RerollJoinAttempts + " 次): " + err);
                 session.StatusMessage = CsrLoc.T("status.reroll_retrying", session.RerollJoinAttempts);
@@ -239,6 +276,14 @@ namespace PeakCSR
                 RetryRerollJoin(session);
             });
             session.Notify();
+        }
+
+        // 会话身份校验: 换房回调属于异步链, 玩家可能已经开了新会话
+        private static bool IsCurrent(MatchSession session)
+        {
+            MatchCoordinator owner = MatchCoordinator.Instance;
+            if (owner == null) return false;
+            return ReferenceEquals(owner.CurrentSession, session);
         }
 
         private void OnLobbyError(MatchSession session, string err)
