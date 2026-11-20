@@ -93,6 +93,20 @@ namespace PeakCSR
         public bool HostStartRequested;
         public float StartCountdownUntil = -1f;
 
+        // ===== 登顶宣告与胜负仲裁 =====
+        // 我方真实完赛用时 (统计为准, >0 表示已登顶)
+        public long SelfPeakMs;
+        // 我方是否已广播出自己的 PEAK 包
+        public bool SelfPeakBroadcasted;
+        // 收到的对手登顶用时 (>0 表示对手已宣告登顶)
+        public long OppPeakMs;
+        // 对手 PEAK 包到达的本地时刻, 用于先后仲裁
+        public float OppPeakReceivedAt = -1f;
+        // 我方 PEAK 广播的本地时刻: 等对端回执的窗口从这里起算
+        public float SelfPeakBroadcastAt = -1f;
+        // 胜负仲裁已出结果 (防止同一局被裁决两次)
+        public bool OutcomeDecided;
+
         // ===== 作废 / 断线 =====
         public bool MatchVoided;
         public string VoidReason = "";
@@ -101,6 +115,7 @@ namespace PeakCSR
         public bool ObservingDisconnect;
         // 一次性广播标记: 同一条提示每局只推一次, 避免轮询重复刷屏
         public bool StartAnnounced;
+        public float LastCountdownShown = -1f;
         public bool SelfPeakAnnounced;
         public bool OppPeakAnnounced;
         public bool SelfDnfAnnounced;
@@ -109,6 +124,7 @@ namespace PeakCSR
         public bool RoomClosingAnnounced;
         public float DisconnectObserveUntil;
         public string DisconnectReason = "";
+        public bool ObservationNeedsLiveEvidence;
         public bool OpponentDepartedObserved;
         // 本局是否成功连上过实时通道: 从没连上就不拿它的断线当信号
         public bool LiveEverConnected;
@@ -153,8 +169,9 @@ namespace PeakCSR
 
         // ===== 本局分段与数据采集 =====
         public readonly SplitTracker Splits = new SplitTracker();
-        // RANKED 原始分段兜底 (仅当自建采集器完全没数据时才使用)
-        public readonly List<long> LiveSplitsFallback = new List<long>();
+        // 用 Seed + LevelIndex 共同标识地图身份
+        private int _routeSpanSeed = -1;
+        private int _routeSpanLevel = -999;
 
         public string StatusMessage = "";
 
@@ -248,6 +265,14 @@ namespace PeakCSR
             MyRerollVoteActive = false;
             OppRerollVoteActive = false;
             StartAnnounced = false;
+            LastCountdownShown = -1f;
+            // 换图重开: 上一局的登顶宣告与仲裁状态必须清零, 否则新局会被旧结果锁死
+            SelfPeakMs = 0L;
+            OppPeakMs = 0L;
+            SelfPeakBroadcasted = false;
+            SelfPeakBroadcastAt = -1f;
+            OppPeakReceivedAt = -1f;
+            OutcomeDecided = false;
             SelfPeakAnnounced = false;
             OppPeakAnnounced = false;
             SelfDnfAnnounced = false;
@@ -276,26 +301,6 @@ namespace PeakCSR
                 || TransitionInFlight;
         }
 
-        // 求本局路线在"绝对进度点索引"里的区间
-        // 必须来自游戏本体真实 progressPoints, 不能用 Splits.RouteLength 倒推
-        public bool TryResolveRouteSpan(out int routeStartIndex, out int routeLength)
-        {
-            routeStartIndex = -1;
-            routeLength = -1;
-
-            // 全山: 不需要裁剪, 直接按已记录的最大索引导出
-            if (Route <= 0) return false;
-
-            // Route 是 1-based 的群系出现序号, 先换算成真实进度点索引
-            int start;
-            int count;
-            if (!_gw.TryGetBiomePointSpan(Route - 1, out start, out count)) return false;
-            if (count <= 0) return false;
-
-            routeStartIndex = start;
-            routeLength = count;
-            return true;
-        }
 
         // =====================================================================
         // 服务端房间快照同步 (原 MatchController.SyncFromRaceInfo 逐行迁移)
@@ -461,8 +466,6 @@ namespace PeakCSR
                         StatusMessage = CsrLoc.T("status.running", OpponentName, OpponentElo);
                     }
                 }
-
-                AnnounceOpponentDnf(opp);
             }
 
             if (!SwitchingRerollRoom
@@ -478,16 +481,52 @@ namespace PeakCSR
 
         // ===== 对局状态广播 (每局每条只推一次) =====
 
-        // 我方登顶: 由结算路径调用 (那里才知道确切的完赛用时)
+        // 我方登顶: 记录用时并广播 PEAK 包给对手
         public void AnnounceSelfPeak(long elapsedMs)
         {
-            if (SelfPeakAnnounced) return;
-            SelfPeakAnnounced = true;
-            string clock = CsrFormat.FormatClock(elapsedMs / 1000.0);
-            _gw.PushSystemChat(CsrLoc.T("chat.match.self_peak", clock));
+            if (elapsedMs <= 0) elapsedMs = 0;
+            if (SelfPeakMs <= 0) SelfPeakMs = elapsedMs;
+            if (!SelfPeakAnnounced)
+            {
+                SelfPeakAnnounced = true;
+                string clock = CsrFormat.FormatClock(SelfPeakMs / 1000.0);
+                _gw.PushSystemChat(CsrLoc.T("chat.match.self_peak", clock));
+            }
+            // 广播登顶宣告 (重发是安全的, 对手侧只认第一条)
+            if (!SelfPeakBroadcasted)
+            {
+                try
+                {
+                    _gw.SendChat(PcsrProtocol.EncodePeak(SelfPeakMs));
+                    SelfPeakBroadcasted = true;
+                    SelfPeakBroadcastAt = Now();
+                }
+                catch
+                {
+                    // socket 未就绪: 下一帧 Tick 会重试
+                }
+            }
             // 等对手期间房间会在 AutoEndMs 后关闭, 顺手把倒计时也广播掉
             AnnounceRoomClosing();
         }
+
+        // 记录收到的对手登顶宣告 (重复包只认第一条)
+        public void NoteOpponentPeak(long elapsedMs)
+        {
+            if (OppPeakMs > 0) return;
+            if (elapsedMs < 0) elapsedMs = 0;
+            OppPeakMs = elapsedMs <= 0 ? 1L : elapsedMs;
+            OppPeakReceivedAt = Now();
+            if (!OppPeakAnnounced)
+            {
+                OppPeakAnnounced = true;
+                double sec = OppPeakMs / 1000.0;
+                _gw.PushSystemChat(CsrLoc.T("chat.match.opp_peak", OpponentName, CsrFormat.FormatClock(sec)));
+            }
+        }
+
+        // 我方是否已进入"登顶待仲裁"状态
+        public bool SelfPeaked { get { return SelfPeakMs > 0; } }
 
         // 我方阵亡
         public void AnnounceSelfDnf(bool isTimeout)
@@ -526,30 +565,38 @@ namespace PeakCSR
         }
 
         // 采集双方分段耗时, 用于赛后战报
-        // 主数据源为自建 SplitTracker (只记录真实到达, 不填充假数据)
+        // 本地走篝火事件 (CampfireSplitPatch), 对手走进度点索引投影
         private void CaptureLiveSplits(RaceParticipant self, RaceParticipant opp, RaceInfo race)
         {
             try
             {
-                // 保留一份 RANKED 原始数据作为兜底，只有本次确实读到分段时才覆盖
-                if (self != null && !string.IsNullOrEmpty(self.SteamId))
-                {
-                    List<long> mine = _gw.GetLiveSplits(self.SteamId);
-                    if (mine != null && mine.Count > 0)
-                    {
-                        LiveSplitsFallback.Clear();
-                        for (int i = 0; i < mine.Count; i++) LiveSplitsFallback.Add(mine[i]);
-                    }
-                }
+                // 路线区间登记: 段收集与导出都要按本局路线裁剪
+                EnsureRouteSpanRegistered();
 
-                // 对手: 用 Flags >> 4 的绝对点灯数推断, 但只记录"确实前进"的那一格, 不再伪造填充
+                // 对手: Flags >> 4 = maxProgressPointReached (钳到 0~15), 是 0-based 索引。
+                // 用进度值解 "索引 0 + 进度 0" 的歧义; 跳帧的段用帧时间回填并标 Estimated。
                 if (opp != null && !string.IsNullOrEmpty(opp.SteamId))
                 {
-                    int segmentsLit = opp.Flags >> 4;
+                    int pointIndex = opp.Flags >> 4;
                     long elapsed = opp.LiveTimeMs.HasValue ? opp.LiveTimeMs.Value : 0L;
-                    if (segmentsLit > 0 && elapsed > 0)
+                    if (elapsed > 0)
                     {
-                        Splits.ObserveSegmentsLit(opp.SteamId, segmentsLit, elapsed);
+                        IRankedPeakGateway gw = _gw;
+                        ProgressPointInfo[] pts = gw.GetProgressPoints();
+                        int spanStart = Splits.RouteStartIndex;
+                        int spanEnd = Splits.RouteEndIndex;
+                        Func<int, string> keyAt = delegate(int idx)
+                        {
+                            if (pts == null || idx < 0 || idx >= pts.Length) return "";
+                            return BiomeSegmenter.NormalizeTitle(pts[idx].Title);
+                        };
+                        Func<int, bool> inRoute = delegate(int idx)
+                        {
+                            if (spanStart >= 0 && idx < spanStart) return false;
+                            if (spanEnd >= 0 && idx > spanEnd) return false;
+                            return true;
+                        };
+                        Splits.ObservePeerFrame(opp.SteamId, pointIndex, opp.Progress, elapsed, keyAt, inRoute);
                     }
                 }
             }
@@ -559,77 +606,83 @@ namespace PeakCSR
             }
         }
 
-        // 分段名: 单群系只显示该群系内的段, 全山显示从第一段开始
-        public string BuildSplitLabel(int index)
+        // 把本局路线的进度点区间登记进 SplitTracker (每张地图只需一次)
+        public void EnsureRouteSpanRegistered()
         {
-            int absoluteIndex = index;
-            if (Route > 0)
-            {
-                int routeStart;
-                int routeLen;
-                if (TryResolveRouteSpan(out routeStart, out routeLen) && routeStart >= 0)
-                {
-                    absoluteIndex = routeStart + index;
-                }
-            }
-            string biome = _gw.GetSegmentBiomeName(LevelIndex, absoluteIndex) ?? "";
-            return "SEG " + (index + 1) + (string.IsNullOrEmpty(biome) ? "" : " · " + biome);
+            bool sameMap = Splits.RouteStartIndex >= 0
+                && _routeSpanSeed == Seed && _routeSpanLevel == LevelIndex;
+            if (sameMap) return;
+            IRankedPeakGateway gw = _gw;
+            if (gw == null) return;
+            int start;
+            int end;
+            if (!gw.TryResolveRouteSpanFor(Route, out start, out end)) return;
+            Splits.SetRoute(start, end);
+            _routeSpanSeed = Seed;
+            _routeSpanLevel = LevelIndex;
+            PcsrLog.LogInfo("[PeakCSR] 本局赛段区间: Route=" + Route + ", 进度点 " + start + ".." + end);
         }
 
-        // 把 SplitTracker 的原始记录裁剪成本局路线的相对分段
-        public void RebuildSplits(List<long> mySplits, List<long> oppSplits)
+        // 新地图的进度点表已加载: 之前缓存的区间属于上一张图, 作废
+        public void InvalidateRouteSpan()
+        {
+            _routeSpanSeed = -1;
+            _routeSpanLevel = -999;
+            Splits.SetRoute(-1, -1);
+        }
+
+        // 构建本局路线的赛段模型 (段名与端点全部取自真实进度点/篝火)
+        public List<BiomeSegment> BuildRouteSegments()
+        {
+            EnsureRouteSpanRegistered();
+            IRankedPeakGateway gw = _gw;
+            if (gw == null) return new List<BiomeSegment>();
+
+            ProgressPointInfo[] pts = gw.GetProgressPoints();
+            if (pts == null || pts.Length < 2) return new List<BiomeSegment>();
+
+            BiomeSegmenter.PointInput[] input = new BiomeSegmenter.PointInput[pts.Length];
+            for (int i = 0; i < pts.Length; i++)
+            {
+                input[i].Title = pts[i].Title;
+                input[i].HasPosition = pts[i].HasPosition;
+                input[i].Z = pts[i].Z;
+                input[i].IsNadir = pts[i].IsNadir;
+            }
+
+            return BiomeSegmenter.Build(
+                input,
+                Splits.RouteStartIndex,
+                Splits.RouteEndIndex,
+                delegate(int boundaryIdx)
+                {
+                    float z;
+                    if (gw.TryGetCampfireZ(boundaryIdx, out z)) return (float?)z;
+                    return null;
+                });
+        }
+
+        // 段名: 一律取 progressPoints[i].title
+        public string BuildSplitLabel(int index)
+        {
+            List<BiomeSegment> segs = BuildRouteSegments();
+            if (index >= 0 && index < segs.Count) return segs[index].Key;
+            return "SEG " + (index + 1);
+        }
+
+        // 导出双方赛段记录 (已按本局路线裁剪)
+        public void RebuildSplits(List<SplitEntry> mySplits, List<SplitEntry> oppSplits)
         {
             mySplits.Clear();
             oppSplits.Clear();
+            EnsureRouteSpanRegistered();
 
             string mySteamId = _gw.MySteamId;
-
-            int routeStart = Splits.RouteStartIndex;
-            int routeLen = Splits.RouteLength;
-
-            // 单群系: routeStart = 真实进度点起点, routeLen = 该群系包含的段数
-            // 全山: routeStart = -1, routeLen = -1 (取已记录的最大索引)
-            if (routeStart < 0 && Route > 0)
-            {
-                int resolvedStart;
-                int resolvedLen;
-                if (TryResolveRouteSpan(out resolvedStart, out resolvedLen))
-                {
-                    routeStart = resolvedStart;
-                    routeLen = resolvedLen;
-                }
-                else
-                {
-                    // 拿不到真实区间就保持"开放长度", 不要用 Route-1 猜一个起点
-                    routeStart = -1;
-                    routeLen = -1;
-                }
-            }
-
-            List<long> mine = Splits.Export(mySteamId, routeStart, routeLen);
-            List<long> theirs = Splits.Export(OpponentSteamId, routeStart, routeLen);
-
-            // 自建采集器完全没数据时才回退到 RANKED 原始分段。
-            // 单群系原本被排除, 但 RANKED 的 LiveSplitTrack 里存的是"绝对点灯段"的时间,
-            // 单群系只会让序列前置若干空位, 不会伪造数据, 所以展示层裁剪后依然可用,
-            // 比"整张表全空"要好得多。
-            if (CountNonZero(mine) == 0 && CountNonZero(theirs) == 0
-                && LiveSplitsFallback.Count > 0)
-            {
-                PcsrLog.LogInfo("[PeakCSR] 自建分段为空，回退使用 RANKED 原始分段 (Route=" + Route + ")。");
-                for (int i = 0; i < LiveSplitsFallback.Count; i++) mySplits.Add(LiveSplitsFallback[i]);
-                return;
-            }
+            List<SplitEntry> mine = Splits.Export(mySteamId);
+            List<SplitEntry> theirs = Splits.Export(OpponentSteamId);
 
             for (int i = 0; i < mine.Count; i++) mySplits.Add(mine[i]);
             for (int i = 0; i < theirs.Count; i++) oppSplits.Add(theirs[i]);
-        }
-
-        private static int CountNonZero(List<long> list)
-        {
-            int c = 0;
-            for (int i = 0; i < list.Count; i++) if (list[i] > 0) c++;
-            return c;
         }
     }
 }

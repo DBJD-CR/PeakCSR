@@ -17,6 +17,83 @@ namespace PeakCSR
             _owner = owner;
         }
 
+        // ===== 登顶先后仲裁 =====
+        // 唯一可信的胜负依据: 双方各自广播的 PEAK 用时
+
+        // 等对端回执的窗口。这个值只影响"对手包还没到的等待时间", 不影响判定精度,
+        // 取 1.5s 是为了覆盖 socket 半秒级抖动, 又远小于原 45s 观察窗
+        public const float PeakAckWindowSeconds = 1.5f;
+
+        // 同时登顶的判定阈值
+        // 精度事实: RaceTimer.CurrentElapsedMs 是 (Time.time - start) * 1000f, 采样在渲染帧上,
+        // 真实分辨力 = 1 帧 (60fps 约 16.7ms); 双方 ResyncStart 的本地起点还有几十毫秒
+        // 的网络对齐偏差。取 100ms (约 3~6 帧) 既覆盖起点对齐误差, 又不会把真实胜负误判成同时
+        public const long PeakTieThresholdMs = 100L;
+
+        // 由 MatchCoordinator.TickActiveSession 每帧驱动。返回 true 表示本帧已做出裁决。
+        public bool ArbitratePeak(MatchSession session)
+        {
+            if (session == null) return false;
+            if (session.OutcomeDecided) return false;
+            if (session.State == CsMatchState.Finished) return false;
+            if (session.MatchVoided || session.DisconnectConfirmed || session.VoidSubmitted) return false;
+            if (!session.SelfPeaked && session.OppPeakMs <= 0) return false;
+
+            float now = Time.realtimeSinceStartup;
+
+            // 情况 1: 双方都已宣告登顶 -> 比较用时
+            if (session.SelfPeaked && session.OppPeakMs > 0)
+            {
+                long delta = session.SelfPeakMs - session.OppPeakMs;
+                if (delta < 0) delta = -delta;
+
+                if (delta <= PeakTieThresholdMs)
+                {
+                    session.OutcomeDecided = true;
+                    PcsrLog.LogWarning("[PeakCSR] 双方几乎同时登顶 (差 " + delta + "ms)，本局作废不计分。");
+                    ConcludeVoid(session, CsrLoc.T("status.void_peak_tie"));
+                    return true;
+                }
+
+                session.OutcomeDecided = true;
+                bool iWon = session.SelfPeakMs < session.OppPeakMs;
+                if (iWon)
+                {
+                    ConcludeMatch(session, true, CsrLoc.T("status.win.peak",
+                        CsrFormat.FormatClock(session.SelfPeakMs / 1000.0)));
+                }
+                else
+                {
+                    ConcludeMatch(session, false, CsrLoc.T("status.loss.peak",
+                        session.OpponentName, CsrFormat.FormatClock(session.OppPeakMs / 1000.0)));
+                }
+                return true;
+            }
+
+            // 情况 2: 我方已登顶, 对手未宣告 -> 我方先到, 等回执窗口
+            if (session.SelfPeaked && session.OppPeakMs <= 0)
+            {
+                if (session.SelfPeakBroadcastAt < 0f) return false;
+                if (now - session.SelfPeakBroadcastAt < PeakAckWindowSeconds) return false;
+
+                session.OutcomeDecided = true;
+                ConcludeMatch(session, true, CsrLoc.T("status.win.peak",
+                    CsrFormat.FormatClock(session.SelfPeakMs / 1000.0)));
+                return true;
+            }
+
+            // 情况 3: 对手已宣告登顶, 我方未登顶 -> 我方后到, 立刻判负
+            if (!session.SelfPeaked && session.OppPeakMs > 0)
+            {
+                session.OutcomeDecided = true;
+                ConcludeMatch(session, false, CsrLoc.T("status.loss.peak",
+                    session.OpponentName, CsrFormat.FormatClock(session.OppPeakMs / 1000.0)));
+                return true;
+            }
+
+            return false;
+        }
+
         // ===== 胜负判定 =====
         public void EvaluateWinCondition(MatchSession session, RaceInfo race, RaceParticipant self, RaceParticipant opp)
         {
@@ -27,19 +104,17 @@ namespace PeakCSR
             // 本机连接此刻不健康: 手上的 self/opp 数据不可信, 一律不判
             if (!_owner.Guardian.IsLocalConnectivityHealthy(session)) return;
 
-            // 只有真实完赛 (服务端给出 finished + 名次) 才算数, 不做任何本地推断
-            if (self.State == "finished" && self.Rank.HasValue && self.Rank.Value == 1)
+            // 服务端给出 finished + 名次时, 只用它来补全"我方/对手完赛用时",
+            // 真正的胜负裁决交给 ArbitratePeak (以 PEAK 协议用时为准, 双方结论一致)
+            if (self.State == "finished" && self.TotalMs.HasValue)
             {
-                double sec = (self.TotalMs ?? 0) / 1000.0;
-                ConcludeMatch(session, true, CsrLoc.T("status.win.peak", CsrFormat.FormatClock(sec)));
-                return;
+                session.AnnounceSelfPeak(self.TotalMs.Value);
             }
-            if (opp != null && opp.State == "finished" && opp.Rank.HasValue && opp.Rank.Value == 1)
+            if (opp != null && opp.State == "finished" && opp.TotalMs.HasValue)
             {
-                double sec = (opp.TotalMs ?? 0) / 1000.0;
-                ConcludeMatch(session, false, CsrLoc.T("status.loss.peak", session.OpponentName, CsrFormat.FormatClock(sec)));
-                return;
+                session.NoteOpponentPeak(opp.TotalMs.Value);
             }
+            if (ArbitratePeak(session)) return;
 
             // 对手 dnf 分支的前提: 本局必须真的通过实时通道拿到过对手心跳证据。
             // socket 从未连上时 IsOpponentHeartbeatFresh 会返回 true (无法判断不做反向误判),
@@ -57,19 +132,20 @@ namespace PeakCSR
             }
 
             // 对手 dnf: 必须同时满足"对手实时心跳还新鲜" 才认定是真实死亡/投降,
-            // 否则就是对手掉线 (服务端把掉线者也标成 dnf), 这种情况要作废而不是判我方胜。
+            // 否则就是对手掉线 (服务端把掉线者也标成 dnf), 这种情况要作废而不是判我方胜
             if (opp != null && opp.State == "dnf" && !race.ReviveDead)
             {
                 // 没有心跳通道可依 (从未连上) 时不能判胜: 交给观察窗, 恢复不了就作废
                 if (!heartbeatEvidenceAvailable)
                 {
                     PcsrLog.LogWarning("[PeakCSR] 对手 DNF 但本局从未建立实时通道，无法确认是阵亡还是掉线，暂不判胜。");
-                    _owner.Guardian.BeginDisconnectObservation(session, "opponent dnf without live evidence");
+                    _owner.Guardian.BeginDisconnectObservation(session, "opponent dnf without live evidence", true);
                     return;
                 }
 
                 if (_gw.IsOpponentHeartbeatFresh(session.OpponentSteamId))
                 {
+                    // 播报在确认 dnf 的分支里做
                     session.AnnounceOpponentDnf();
                     ConcludeMatch(session, true, CsrLoc.T("status.win.opp_dnf", session.OpponentName));
                 }
@@ -94,7 +170,9 @@ namespace PeakCSR
 
         public void ConcludeMatch(MatchSession session, bool iWon, string reason)
         {
-            ConcludeMatchInternal(session, iWon, reason, false);
+            // 只有"我方真的登顶完赛"才允许把战报进度抬到 100%
+            bool selfSummited = iWon && session.SelfPeaked;
+            ConcludeMatchInternal(session, iWon, reason, false, selfSummited);
         }
 
         // 无法确认结果 (掉线 / 被踢 / Photo 房间断线) 的作废局: 双方都不计分、不计胜负
@@ -119,11 +197,18 @@ namespace PeakCSR
             {
             }
 
-            ConcludeMatchInternal(session, false, reason, true);
+            ConcludeMatchInternal(session, false, reason, true, false);
 
             // 作废后房间已经没有继续存在的意义, 尽早清掉公开房标记,
             // 避免残留的 "1/2 等待中" 房间被第三方插进来打一局没有规则的幽灵对局。
             RetireVoidLobby(session);
+
+            // 换图窗口内不报云端作废
+            if (session.SwitchingRerollRoom)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 换图切换期间不提交云端作废 (房间号与地图数据不属于同一场)。");
+                return;
+            }
 
             // 通知云端作废, 让双方都不会被扣分
             LadderSyncService ladder = _owner.Ladder;
@@ -138,7 +223,7 @@ namespace PeakCSR
             }
         }
 
-        private void ConcludeMatchInternal(MatchSession session, bool iWon, string reason, bool isVoid)
+        private void ConcludeMatchInternal(MatchSession session, bool iWon, string reason, bool isVoid, bool selfSummited)
         {
             if (session.State == CsMatchState.Finished) return;
             session.State = CsMatchState.Finished;
@@ -152,8 +237,8 @@ namespace PeakCSR
             {
                 float peak = ProgressMonotonicState.ReportedProgress;
                 if (peak > session.MyBestProgress) session.MyBestProgress = peak;
-                // 我自己登顶完赛: 无论快照停在哪一帧, 战报都应该显示 100%
-                if (iWon) session.MyBestProgress = 1f;
+                // 只有我自己登顶完赛才强制 100% (对手 DNF/投降 时照实记录)
+                if (selfSummited) session.MyBestProgress = 1f;
             }
             if (session.MyBestProgress < 0f) session.MyBestProgress = 0f;
             if (session.MyBestProgress > 1f) session.MyBestProgress = 1f;
@@ -175,8 +260,9 @@ namespace PeakCSR
                     session.MyBestProgress,
                     session.OppBestProgress);
 
-            // 自方登顶播报 (带上真实完赛用时; 掉线作废不作登顶播报)
-            if (!isVoid && iWon)
+            // 自方登顶播报 (带上真实完赛用时): 只有真的登顶完赛才播,
+            // 对手 DNF/投降 拿下的胜利不算登顶
+            if (!isVoid && selfSummited)
             {
                 long peakMs = _gw.TimerElapsedMs;
                 if (peakMs > 0) session.AnnounceSelfPeak(peakMs);
@@ -192,9 +278,8 @@ namespace PeakCSR
 
             BuildPostMatchData(session, iWon, reason, detail, wasPlacement, isVoid);
 
-            // 战报不再糊脸自动弹出: 挂一个"可查看"标记, 等玩家在结算界面/主菜单主动打开
-            // 作废局也给标记, 否则玩家会以为对局凭空消失
-            PostMatchReportView.MarkPostMatchPending();
+            // 战报立即弹出: 一方登顶即给双方看结果, 不再等结算界面关闭事件
+            PostMatchReportView.ShowPostMatchWindow();
 
             // 换房期间禁止上报
             if (session.SwitchingRerollRoom && !isVoid)
@@ -261,23 +346,68 @@ namespace PeakCSR
             };
             data.BiomeLabel = _gw.GetBiomeLabel(session.LevelIndex) ?? "";
 
-            // 分段数据优先用自建采集器 (只记录真实到达)
-            List<long> mySplits = new List<long>();
-            List<long> oppSplits = new List<long>();
+            // 分段数据: 本地走篝火事件, 对手走索引投影, 统一成"段名 + 累计用时"
+            List<SplitEntry> mySplits = new List<SplitEntry>();
+            List<SplitEntry> oppSplits = new List<SplitEntry>();
             session.RebuildSplits(mySplits, oppSplits);
 
             // 汇总总用时
-            if (mySplits.Count > 0) data.MyTotalMs = mySplits[mySplits.Count - 1];
-            if (oppSplits.Count > 0) data.OppTotalMs = oppSplits[oppSplits.Count - 1];
+            if (mySplits.Count > 0) data.MyTotalMs = mySplits[mySplits.Count - 1].ElapsedMs;
+            if (oppSplits.Count > 0) data.OppTotalMs = oppSplits[oppSplits.Count - 1].ElapsedMs;
 
-            // 构建分段对比行: 按本局路线裁剪并重编号, 缺的段老实留空
-            int count = Mathf.Max(mySplits.Count, oppSplits.Count);
+            // 构建段对照表: 以段模型为准, 双方按"绝对进度点索引"对齐
+            List<BiomeSegment> segments = new List<BiomeSegment>();
+            try { segments = session.BuildRouteSegments(); }
+            catch { }
+
+            // 段终点索引 -> 各自 SplitEntry
+            Dictionary<int, SplitEntry> myByIndex = new Dictionary<int, SplitEntry>();
+            for (int i = 0; i < mySplits.Count; i++) myByIndex[mySplits[i].AbsoluteIndex] = mySplits[i];
+            Dictionary<int, SplitEntry> oppByIndex = new Dictionary<int, SplitEntry>();
+            for (int i = 0; i < oppSplits.Count; i++) oppByIndex[oppSplits[i].AbsoluteIndex] = oppSplits[i];
+
+            int count = segments.Count;
+            if (count == 0) count = Mathf.Max(mySplits.Count, oppSplits.Count);
             for (int i = 0; i < count; i++)
             {
                 CsrSplitRow row = new CsrSplitRow();
-                row.MyMs = i < mySplits.Count ? mySplits[i] : 0;
-                row.OppMs = i < oppSplits.Count ? oppSplits[i] : 0;
-                row.Label = session.BuildSplitLabel(i);
+                // 段模型里的 keyIndex 是该段最后一个进度点索引
+                int keyIndex = i;
+                if (i < segments.Count && !string.IsNullOrEmpty(segments[i].Key))
+                {
+                    row.Label = segments[i].Key;
+                    row.IsFinal = segments[i].IsFinal;
+                    keyIndex = segments[i].LastPointIdx;
+                }
+                else if (i < mySplits.Count && !string.IsNullOrEmpty(mySplits[i].Key))
+                {
+                    row.Label = mySplits[i].Key;
+                    keyIndex = mySplits[i].AbsoluteIndex;
+                }
+                else if (i < oppSplits.Count && !string.IsNullOrEmpty(oppSplits[i].Key))
+                {
+                    row.Label = oppSplits[i].Key;
+                    keyIndex = oppSplits[i].AbsoluteIndex;
+                }
+                else
+                {
+                    row.Label = "SEG " + (i + 1);
+                }
+
+                SplitEntry mine;
+                if (myByIndex.TryGetValue(keyIndex, out mine))
+                {
+                    row.MyMs = mine.ElapsedMs;
+                    row.MyEstimated = mine.Estimated;
+                    row.MyReached = true;
+                }
+                SplitEntry theirs;
+                if (oppByIndex.TryGetValue(keyIndex, out theirs))
+                {
+                    row.OppMs = theirs.ElapsedMs;
+                    row.OppEstimated = theirs.Estimated;
+                    row.OppReached = true;
+                }
                 data.Splits.Add(row);
             }
 
