@@ -8,14 +8,12 @@ namespace PeakCSR
     {
         private static readonly RatingRules R = RatingRules.Instance;
 
-        public const int MinSeedElo = 850;      // 与 R.Seed.Min 同值, 保留常量便于外部引用
-        public const int MaxSeedElo = 1500;
-        public const int PlacementMatchesCount = 10;
-        public const double EloScaleDenominator = 550.0;
-        public const double TenderfootMultiplier = 0.75;
-        // 达到该分段后获胜保底减半, 避免天阶高倍率下"赢一局抵输七局"
-        public const int HighEloFloorHalveThreshold = 1650;
-        public const int HighEloFloorCap = 12;
+        // 以下边框值一律实时读规则 (shared/rating-rules.json)
+        public static int MinSeedElo { get { return R.Seed.Min; } }
+        public static int MaxSeedElo { get { return R.Seed.Max; } }
+        public static int PlacementMatchesCount { get { return R.PlacementMatches; } }
+        public static int EloClampMin { get { return R.Elo.ClampMin; } }
+        public static int EloClampMax { get { return R.Elo.ClampMax; } }
 
         private static int Clamp(int v, int min, int max)
         {
@@ -48,7 +46,8 @@ namespace PeakCSR
             double ascentMult = GetAscentMultiplier(ascent);
             if (format == McsrRuleFormat.BiomeSprint)
             {
-                return Math.Round(R.BiomeSprintFactor * ascentMult, 2);
+                // 与 Worker 的 Math.round(x*100)/100 同口径: .xx5 一律进位
+                return Math.Round(R.BiomeSprintFactor * ascentMult, 2, MidpointRounding.AwayFromZero);
             }
             return ascentMult;
         }
@@ -90,7 +89,8 @@ namespace PeakCSR
         // 软折算公式：1000 + (原版ELO - 1000) * 0.5，限制在 850 ~ 1500 之间
         public static int ComputeSoftResetSeedElo(int vanillaElo)
         {
-            int soft = (int)Math.Round(R.Seed.VanillaBase + (vanillaElo - R.Seed.VanillaBase) * R.Seed.VanillaWeight);
+            int soft = (int)Math.Round(R.Seed.VanillaBase + (vanillaElo - R.Seed.VanillaBase) * R.Seed.VanillaWeight,
+                MidpointRounding.AwayFromZero);
             if (soft < R.Seed.Min) soft = R.Seed.Min;
             if (soft > R.Seed.Max) soft = R.Seed.Max;
             return soft;
@@ -136,7 +136,9 @@ namespace PeakCSR
                 bonus = (relief + gapTerm) * scale;
             }
 
-            int rounded = (int)Math.Round(bonus * antiBoostWeight);
+            // 必须用 AwayFromZero (.5 进位): Worker 用 Math.round, .NET 默认是银行家舍入 (.5 取偶),
+            // 两边不一致会让同一局的本地加分与云端结算差 1 分 (例如 4.5 -> 本地 4 / 云端 5)
+            int rounded = (int)Math.Round(bonus * antiBoostWeight, MidpointRounding.AwayFromZero);
             int maxCap = isPlacement ? pc.Cap.Placement : pc.Cap.Regular;
             if (rounded < -maxCap) rounded = -maxCap;
             if (rounded > maxCap) rounded = maxCap;
@@ -161,7 +163,8 @@ namespace PeakCSR
             out int baseDeltaOut)
         {
             double expected = 1.0 / (1.0 + Math.Pow(10.0, (opponentElo - myElo) / R.Elo.ScaleDenominator));
-            int rawBase = (int)Math.Round(kFactor * (actualScore - expected) * weightFactor);
+            // 同上: 与 Worker 的 Math.round 对齐
+            int rawBase = (int)Math.Round(kFactor * (actualScore - expected) * weightFactor, MidpointRounding.AwayFromZero);
 
             if (antiBoostWeight > 0.01)
             {

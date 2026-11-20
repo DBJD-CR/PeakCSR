@@ -39,19 +39,12 @@ namespace PeakCSR
                 return 0.0;
             }
 
-            int gap = myElo - opponentElo;
-            if (gap < 0) gap = -gap;
-            if (gap > R.AntiBoost.GapThreshold)
-            {
-                warningReasonKey = "antiboost.gap";
-                return R.AntiBoost.GapWeight;
-            }
-
             if (string.IsNullOrEmpty(opponentSteamId))
             {
                 return 1.0;
             }
 
+            // 交手频次必须先查，登记与查询放在同一步, 保证无论后面命中哪条规则, 这次交手都被记进台账
             long nowMinutes = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
             int recentCount = ledger.PruneAndCount(opponentSteamId, nowMinutes);
             ledger.Record(opponentSteamId, nowMinutes);
@@ -61,6 +54,15 @@ namespace PeakCSR
                 warningReasonKey = "antiboost.limit";
                 return 0.0;
             }
+
+            int gap = myElo - opponentElo;
+            if (gap < 0) gap = -gap;
+            if (gap > R.AntiBoost.GapThreshold)
+            {
+                warningReasonKey = "antiboost.gap";
+                return R.AntiBoost.GapWeight;
+            }
+
             if (recentCount == 2)
             {
                 warningReasonKey = "antiboost.half";
