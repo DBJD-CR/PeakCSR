@@ -1,6 +1,22 @@
 ﻿$ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
 
+# 用 MSBuild 自己的求值结果读取 ProfileDir (需要 .NET SDK 8+ 的 -getProperty)
+# 这段必须定义在 $ErrorActionPreference 生效后的脚本顶部; 失败时安静返回空串交给兜底
+function Get-MsBuildProfileDir {
+    param([string]$ProjectFile)
+    if (-not (Test-Path $ProjectFile)) { return "" }
+    try {
+        $value = & dotnet msbuild $ProjectFile -nologo -v:q -getProperty:ProfileDir 2>$null
+        if ($LASTEXITCODE -ne 0) { return "" }
+        if ($null -eq $value) { return "" }
+        return ([string]$value).Trim()
+    }
+    catch {
+        return ""
+    }
+}
+
 # 游戏运行时 DLL 会被进程锁定, 复制会抛 IOException; 这里做带提示的重试
 function Copy-WithRetry {
     param([string]$Source, [string]$Target, [int]$Retries = 15)
@@ -19,7 +35,28 @@ function Copy-WithRetry {
     }
 }
 $BinDir      = Join-Path $ProjectRoot "bin"
-$ProfileRoot = "C:\Users\ASUS\AppData\Roaming\Thunderstore Mod Manager\DataFolder\PEAK\profiles\RANKED"
+$csproj      = Join-Path $ProjectRoot "PeakCSR.csproj"
+
+# Profile 路径必须是 MSBuild 实际求值出来的那个
+$ProfileRoot = $env:PEAK_PROFILE_DIR
+if ([string]::IsNullOrWhiteSpace($ProfileRoot)) {
+    $ProfileRoot = Get-MsBuildProfileDir $csproj
+}
+if ([string]::IsNullOrWhiteSpace($ProfileRoot)) {
+    # 兜底: MSBuild 不可用 (例如尚未安装 SDK) 时才退回文本匹配
+    $propsFile = Join-Path $ProjectRoot "local.props"
+    if (Test-Path $propsFile) {
+        Get-Content $propsFile | ForEach-Object {
+            if ($_ -match "<ProfileDir>(.+)</ProfileDir>") {
+                # local.props 是 XML: 路径里的 & 会写成 &, 必须按 XML 解码后再用
+                $ProfileRoot = [System.Net.WebUtility]::HtmlDecode($Matches[1].Trim())
+            }
+        }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($ProfileRoot)) {
+    $ProfileRoot = "C:\Users\ASUS\AppData\Roaming\Thunderstore Mod Manager\DataFolder\PEAK\profiles\RANKED"
+}
 
 # 作者名改为个人 (Thunderstore 显示为 "PeakCSR vX by DBJD-CR")
 $AuthorName  = "DBJD-CR"
@@ -55,7 +92,6 @@ foreach ($dir in $LegacyDirs) {
     }
 }
 
-$csproj = Join-Path $ProjectRoot "PeakCSR.csproj"
 $outDll = Join-Path $BinDir "PeakCSR.dll"
 
 Write-Host "[PeakCSR] Building with modern .NET SDK..." -ForegroundColor Cyan

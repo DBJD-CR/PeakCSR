@@ -16,15 +16,46 @@
 
 ---
 
-## 第二步：创建 Cloudflare Worker 并粘贴代码（1 分钟）
+## 第二步：部署 Worker 代码（1 分钟）
+
+> Worker 已模块化 (`cloudflare/src/` 下按 handlers / domain / db / lib 分层)，
+> 评分参数直接 import 仓库根目录的 [`shared/rating-rules.json`](../shared/rating-rules.json)
+> 单一事实源，因此推荐用 wrangler 命令行部署（在线编辑器无法粘贴多文件模块）。
+
+**方式 A：wrangler 命令行（推荐）**
+
+> `wrangler.toml` 被 `.gitignore` 忽略（里面含个人的 D1 `database_id`），
+> 所以全新 clone 的仓库里没有它。部署前先在 `cloudflare/` 下建一个：
+
+```toml
+# cloudflare/wrangler.toml
+name = "peakcsr-ladder"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "peakcsr-db"
+database_id = "把第一步建库拿到的 ID 填这里"
+```
+
+```powershell
+cd cloudflare
+npm install            # 首次需要
+npx wrangler deploy src/index.js   # 显式入口, 不依赖 wrangler.toml 也能部署
+```
+
+**方式 B：在线编辑器单文件拼接**
 
 1. 在左侧菜单栏点击 **计算 (Workers & Pages)** -> **概览 (Overview)**。
 2. 点击右上角 **创建 (Create)** -> 选择 **创建 Worker (Create Worker)**：
    - 名称填：`peakcsr-ladder`
    - 点击右下角 **部署 (Deploy)**。
 3. 部署成功后，点击右上角的 **编辑代码 (Edit code)** 进入在线编辑器：
-   - 把左侧编辑器里自带的 `worker.js` 默认代码**全部删光**；
-   - 打开咱们仓库里的 [`cloudflare/worker.js`](worker.js) 文件，全选复制粘贴进去；
+   - 把编辑器里自带的默认代码**全部删光**；
+   - 按顺序把 `src/index.js` 引用的各模块内容与 `src/index.js` 合并成一个文件粘贴进去
+     （把 `import` 段替换为各文件的常量与函数定义，把 `import rules from ... rating-rules.json`
+     替换为 `const rules = { ... }` 字面量，内容从 [`shared/rating-rules.json`](../shared/rating-rules.json) 复制）；
    - 点击右上角的 **部署 (Deploy)** 保存代码！
 
 ---
@@ -57,24 +88,26 @@
 
 ---
 
-## 第三步补充 2：重建数据表（本轮改动必须做一次）
+## 第三步补充 2：数据表
 
-本轮把 `settled_matches` 的主键从 `invite_code` 改成了 `match_key`（= `invite_code|seed`），
-并给 `players` 增加了分赛制战绩等字段。目前还在测试期，直接重建最省事：
+### 新建数据库（只需做这一次）
 
-1. 进入 D1 数据库 `peakcsr-db` 的 **控制台 (Console)**。
-2. 依次执行（清空旧表）：
+打开 [`schema.sql`](schema.sql)，全选复制粘贴执行一次即可，一步到位。
+里面全是 `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`，**不会动已有数据**。
 
-   ```sql
-   DROP TABLE IF EXISTS settled_matches;
-   DROP TABLE IF EXISTS match_reports;
-   DROP TABLE IF EXISTS players;
-   DROP TABLE IF EXISTS admin_audit;
-   ```
+### ⚠️ 破坏性重置（仅测试期用）
 
-3. 重新全选粘贴 [`schema.sql`](schema.sql) 并执行。
+下面的语句会**永久删除**全部玩家档案、对局历史与审计记录，重建表结构也不会把它们恢复。
 
-> 不重建也能跑，但旧表的 `settled_matches` 结构对新代码不兼容，会出现结算报错。
+```sql
+DROP TABLE IF EXISTS settled_matches;
+DROP TABLE IF EXISTS match_reports;
+DROP TABLE IF EXISTS players;
+DROP TABLE IF EXISTS admin_audit;
+```
+
+删完之后再执行一次 [`schema.sql`](schema.sql) 重建空表。
+**已有真实玩家的库不要执行这一节**，只想清战绩请改用 `/api/admin` 的 `reset` 动作。
 
 ---
 
