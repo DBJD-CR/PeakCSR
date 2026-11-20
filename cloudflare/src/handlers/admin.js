@@ -2,6 +2,12 @@
 // 需要请求头 X-Admin-Token 与 env.ADMIN_TOKEN 一致
 import { jsonResp, matchKey } from "../lib/http.js";
 import { modeRollbackColumns } from "../db/players.js";
+import rules from "../../../shared/rating-rules.json";
+
+// 回滚时的分数下限直接取规则值, 避免在多处硬编码
+function rulesFloor() {
+  return Number(rules.elo.clampMin) || 100;
+}
 
 export async function handleAdmin(request, body, env) {
   const expected = env && env.ADMIN_TOKEN;
@@ -25,27 +31,34 @@ export async function handleAdmin(request, body, env) {
     if (!row) return jsonResp({ ok: false, error: "Match not found" }, 404);
     if (row.is_void) return jsonResp({ ok: true, status: "already_void" }, 200);
 
-    const win = await env.DB.prepare("SELECT * FROM players WHERE steam_id = ?").bind(row.winner_steam_id).first();
-    const lose = await env.DB.prepare("SELECT * FROM players WHERE steam_id = ?").bind(row.loser_steam_id).first();
-
-    if (win && lose) {
-      const winBack = Math.max(100, win.elo - row.winner_delta);
-      const loseBack = Math.max(100, lose.elo - row.loser_delta);
-      const winMode = modeRollbackColumns(row.format, "wins");
-      const loseMode = modeRollbackColumns(row.format, "losses");
-      await env.DB.batch([
-        env.DB.prepare(
-          `UPDATE players SET elo = ?, wins = MAX(0, wins - 1), streak = ?,
-            ${winMode}, updated_at = ? WHERE steam_id = ?`
-        ).bind(winBack, win.streak > 0 ? win.streak - 1 : 0, now, row.winner_steam_id),
-        env.DB.prepare(
-          `UPDATE players SET elo = ?, losses = MAX(0, losses - 1), streak = ?,
-            ${loseMode}, updated_at = ? WHERE steam_id = ?`
-        ).bind(loseBack, lose.streak < 0 ? lose.streak + 1 : 0, now, row.loser_steam_id),
-        env.DB.prepare("UPDATE settled_matches SET is_void = 1, winner_delta = 0, loser_delta = 0 WHERE match_key = ?")
-          .bind(key)
-      ]);
+    // 原子抢占: 只有把 is_void 从 0 改成 1 的那一次才允许动分数
+    const claim = await env.DB.prepare(
+      "UPDATE settled_matches SET is_void = 1 WHERE match_key = ? AND is_void = 0"
+    ).bind(key).run();
+    if (!claim || !claim.meta || claim.meta.changes === 0) {
+      return jsonResp({ ok: true, status: "already_void" }, 200);
     }
+
+    const winMode = modeRollbackColumns(row.format, "wins");
+    const loseMode = modeRollbackColumns(row.format, "losses");
+    const winGain = Number(row.winner_delta) || 0;
+    const loseGain = Number(row.loser_delta) || 0;
+
+    // 回滚量用"历史里实际记下的变化"; peak_elo 是历史最高分, 回滚不回收
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE players SET elo = MAX(${rulesFloor()}, elo - ?),
+          wins = MAX(0, wins - 1), streak = CASE WHEN streak > 0 THEN streak - 1 ELSE 0 END,
+          ${winMode}, updated_at = ? WHERE steam_id = ?`
+      ).bind(winGain, now, row.winner_steam_id),
+      env.DB.prepare(
+        `UPDATE players SET elo = MAX(${rulesFloor()}, elo - ?),
+          losses = MAX(0, losses - 1), streak = CASE WHEN streak < 0 THEN streak + 1 ELSE 0 END,
+          ${loseMode}, updated_at = ? WHERE steam_id = ?`
+      ).bind(loseGain, now, row.loser_steam_id)
+    ]);
+
+    // 历史里保留原始增减 (审计可追溯), 作废通过 is_void 判定, 不再清零 delta
 
     await audit(env, action, JSON.stringify({ key, inviteCode: row.invite_code, seed: row.seed }), note, now);
     return jsonResp({ ok: true, status: "voided", matchKey: key }, 200);

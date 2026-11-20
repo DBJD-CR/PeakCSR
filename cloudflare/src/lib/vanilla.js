@@ -18,7 +18,8 @@ export async function verifyWithVanillaRaceServer(env, inviteCode, playerA, play
     const data = await resp.json();
     const race = data.race;
     const participants = data.participants || [];
-    if (!race || (expectedSeed && race.seed !== expectedSeed)) {
+    // 种子无条件比对
+    if (!race || Number(race.seed) !== Number(expectedSeed)) {
       return { verified: false };
     }
 
