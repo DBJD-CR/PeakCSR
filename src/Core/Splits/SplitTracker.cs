@@ -3,155 +3,206 @@ using System.Collections.Generic;
 
 namespace PeakCSR
 {
-    // PCSR 自建分段采集器 (原 PcsrSplitTrack 实例化: 每局随 MatchSession 创建, 结束即丢弃, 零残留)
+    // 一条赛段记录
+    public struct SplitEntry
+    {
+        // 段名真值
+        public string Key;
+        // 到达该段终点时的累计用时
+        public long ElapsedMs;
+        // true 表示这段时间是"跳帧回填"出来的, UI 上用 ~ 标记
+        public bool Estimated;
+        // 该段终点在本局山体里的绝对进度点索引
+        public int AbsoluteIndex;
+    }
+
+    // PCSR 自建分段采集器
+    //
+    // 数据来源有两类, 口径统一到"段名 + 累计用时":
+    //   1) 本地权威: Campfire.Light_Rpc 事件 (SplitCapturePatch 转发), 零误差
+    //   2) 对手投影: 进度点索引 (Flags >> 4) + LiveTimeMs, 每秒一帧, 精度 ≤1 帧
     //
     // 为什么不用 RANKED 的 LiveSplitTrack:
-    //   LiveSplitTrack.Observe(steamId, segmentsLit, timeMs) 的 segmentsLit 是 Flags >> 4,
-    //   也就是"整座山的绝对点灯数"。单群系从第 3 个群系开局时它一上来就是 10+,
-    //   而它的实现是 while (value.Count < segmentsLit) value.Add(timeMs) —— 缺几段就用
-    //   同一个时间补齐, 于是出现一串相同的假时间 (例如 00:00.122), 真正属于本局的那一段
-    //   被埋在前面这些填充里, 结算页按 i 取 SegmentBiomeName 自然对不上。
-    //
-    // 本类只记录"该绝对段索引第一次真正到达时的时间", 绝不填充,
-    // 展示时按本局路线的起点裁剪并重编号, 缺的就老实显示"未记录"。
+    //   它的 Observe(steamId, segmentsLit, timeMs) 是 while (count < segmentsLit) list.Add(timeMs),
+    //   缺几段就用同一个时间补齐, 产生一串相同的假时间; 而且 segmentsLit 是"整座山的绝对索引",
+    //   单群系从第 3 个群系开局时一上来就是 10+, 真正属于本局的那一段被埋在前面这些填充里
+
     public sealed class SplitTracker
     {
-        // steamId -> (绝对段索引 -> 首次到达时的累计毫秒)
-        private readonly Dictionary<string, SortedDictionary<int, long>> _splits =
-            new Dictionary<string, SortedDictionary<int, long>>();
+        // steamId -> 有序段记录 (按绝对进度点索引排序, 便于裁剪)
+        private readonly Dictionary<string, SortedDictionary<int, SplitEntry>> _splits =
+            new Dictionary<string, SortedDictionary<int, SplitEntry>>();
 
-        // 记录本局路线起点 (绝对段索引), 用于展示时裁剪
+        // 每个玩家已经处理到的绝对进度点索引 (用于判"是否真的前进了")
+        private readonly Dictionary<string, int> _lastIndex =
+            new Dictionary<string, int>();
+
+        // 本局路线的绝对进度点区间
         private int _routeStartIndex = -1;
-        private int _routeLength = -1;
+        private int _routeEndIndex = -1;
 
         public void Clear()
         {
             _splits.Clear();
+            _lastIndex.Clear();
             _routeStartIndex = -1;
-            _routeLength = -1;
+            _routeEndIndex = -1;
         }
 
-        // 开局时登记本局路线的绝对起点与长度
-        public void SetRoute(int routeStartIndex, int routeLength)
+        // 开局时登记本局路线的绝对区间
+        public void SetRoute(int routeStartIndex, int routeEndIndex)
         {
             _routeStartIndex = routeStartIndex;
-            _routeLength = routeLength;
+            _routeEndIndex = routeEndIndex;
+            // 换路线时旧游标全部作废, 否则新局第一段会因为"索引没涨"而漏记
+            _lastIndex.Clear();
         }
 
         public int RouteStartIndex { get { return _routeStartIndex; } }
-        public int RouteLength { get { return _routeLength; } }
+        public int RouteEndIndex { get { return _routeEndIndex; } }
 
-        // 记录某个绝对段索引首次到达的时间 (只在第一次写入, 绝不覆盖、绝不填充)
-        public void Observe(string steamId, int absoluteSegmentIndex, long elapsedMs)
+        // ===== 本地权威采集 (篝火事件驱动) =====
+
+        // 点亮篝火时由 CampfireSplitPatch 调用
+        // boundaryIndex: 该篝火对应的"段终点进度点索引", 用于与对手侧数据对齐
+        public void ObserveCampfire(string steamId, string segmentKey, int boundaryIndex, long elapsedMs)
         {
             if (string.IsNullOrEmpty(steamId)) return;
-            if (absoluteSegmentIndex < 0) return;
+            if (string.IsNullOrEmpty(segmentKey)) return;
             if (elapsedMs <= 0) return;
-
-            SortedDictionary<int, long> map;
-            if (!_splits.TryGetValue(steamId, out map))
-            {
-                map = new SortedDictionary<int, long>();
-                _splits[steamId] = map;
-            }
-            if (!map.ContainsKey(absoluteSegmentIndex))
-            {
-                map[absoluteSegmentIndex] = elapsedMs;
-            }
+            if (boundaryIndex < 0) boundaryIndex = 0;
+            Write(steamId, boundaryIndex, segmentKey, elapsedMs, false);
         }
 
-        // 直连本地玩家: 由 SplitCapturePatch 通过 MatchCoordinator 转发调用,
-        // 这是最可靠的分段来源 (比对手的 Flags 位域精确)
-        public void ObserveLocalSegment(string steamId, int absoluteSegmentIndex, long elapsedMs)
+        // 本地进度点首次到达 (分段的一个补充来源: 有些段没有篝火, 只有进度点)
+        public void ObserveLocalSegment(string steamId, int absoluteIndex, string segmentKey, long elapsedMs)
         {
-            Observe(steamId, absoluteSegmentIndex, elapsedMs);
+            if (string.IsNullOrEmpty(steamId)) return;
+            if (absoluteIndex < 0) return;
+            if (elapsedMs <= 0) return;
+            Write(steamId, absoluteIndex, segmentKey, elapsedMs, false);
         }
 
-        // 从玩家上报的绝对点灯数推断 (对手侧, 精度受限但不再伪造数据)
-        // 只有当索引确实增加时才写入, 跳过的段留空
+        // ===== 对手投影采集 (进度点索引 + 帧时间) =====
+
+        // progress01 用来解 Flags >> 4 == 0 的歧义:
+        // maxProgressPointReached 初值是 -1, 被 clamp 到 0 后,
+        // "一个点都没到"和"刚到第一个点"在协议层完全一样,
+        // 必须结合进度值才能区分
+        public void ObservePeerFrame(
+            string steamId, int pointIndex, float progress01, long liveTimeMs,
+            Func<int, string> keyAt, Func<int, bool> inRoute)
+        {
+            if (string.IsNullOrEmpty(steamId)) return;
+            if (pointIndex < 0) return;
+            if (liveTimeMs <= 0) return;
+            // pointIndex == 0 且进度为 0: 玩家真的还没动, 不能记成"已通过第一段"
+            if (pointIndex == 0 && progress01 <= 0.001f) return;
+            if (keyAt == null) return;
+
+            int lastIdx;
+            _lastIndex.TryGetValue(steamId, out lastIdx);
+
+            if (pointIndex <= lastIdx) return;
+            _lastIndex[steamId] = pointIndex;
+
+            // 从上一个已处理索引 +1 开始补到当前索引。
+            // 跳帧时中间的段用当前帧时间回填并标 Estimated
+            int from = lastIdx + 1;
+            if (from < 0) from = 0;
+            for (int idx = from; idx <= pointIndex; idx++)
+            {
+                if (inRoute != null && !inRoute(idx)) continue;
+                string key = keyAt(idx);
+                if (string.IsNullOrEmpty(key)) continue;
+                bool estimated = (idx != pointIndex);
+                Write(steamId, idx, key, liveTimeMs, estimated);
+            }
+        }
+
         public void ObserveSegmentsLit(string steamId, int segmentsLit, long elapsedMs)
         {
             if (string.IsNullOrEmpty(steamId)) return;
-            if (segmentsLit <= 0) return;
+            if (segmentsLit < 0) return;
             if (elapsedMs <= 0) return;
+            int absoluteIndex = segmentsLit;
+            int lastIdx;
+            _lastIndex.TryGetValue(steamId, out lastIdx);
+            if (absoluteIndex <= lastIdx) return;
+            _lastIndex[steamId] = absoluteIndex;
+        }
 
-            SortedDictionary<int, long> map;
+        private void Write(string steamId, int index, string key, long elapsedMs, bool estimated)
+        {
+            SortedDictionary<int, SplitEntry> map;
             if (!_splits.TryGetValue(steamId, out map))
             {
-                map = new SortedDictionary<int, long>();
+                map = new SortedDictionary<int, SplitEntry>();
                 _splits[steamId] = map;
             }
-            // segmentsLit 表示"已点亮 segmentsLit 段", 对应的绝对索引是 segmentsLit - 1
-            int absoluteIndex = segmentsLit - 1;
-            if (absoluteIndex < 0) return;
-            if (!map.ContainsKey(absoluteIndex))
+
+            SplitEntry existing;
+            if (map.TryGetValue(index, out existing))
             {
-                map[absoluteIndex] = elapsedMs;
+                // 已有一条精确记录时不覆盖
+                if (!existing.Estimated) return;
+                if (estimated) return;
+                existing.ElapsedMs = elapsedMs;
+                existing.Estimated = false;
+                if (!string.IsNullOrEmpty(key)) existing.Key = key;
+                existing.AbsoluteIndex = index;
+                map[index] = existing;
+                return;
             }
+
+            SplitEntry entry = new SplitEntry();
+            entry.Key = key;
+            entry.ElapsedMs = elapsedMs;
+            entry.Estimated = estimated;
+            entry.AbsoluteIndex = index;
+            map[index] = entry;
         }
 
         public int CountFor(string steamId)
         {
-            SortedDictionary<int, long> map;
+            SortedDictionary<int, SplitEntry> map;
             if (string.IsNullOrEmpty(steamId) || !_splits.TryGetValue(steamId, out map)) return 0;
             return map.Count;
         }
 
-        public bool TryGet(string steamId, int absoluteSegmentIndex, out long elapsedMs)
+        public bool HasAnyRecord(string steamId)
         {
-            elapsedMs = 0;
-            SortedDictionary<int, long> map;
-            if (string.IsNullOrEmpty(steamId) || !_splits.TryGetValue(steamId, out map)) return false;
-            return map.TryGetValue(absoluteSegmentIndex, out elapsedMs);
+            SortedDictionary<int, SplitEntry> map;
+            return !string.IsNullOrEmpty(steamId) && _splits.TryGetValue(steamId, out map) && map.Count > 0;
         }
 
-        // 导出本局路线的分段 (相对序号 0..n), 未到达的段返回 0
-        // routeStartIndex / routeLength 为 -1 时表示"全山", 从索引 0 开始
-        public List<long> Export(string steamId, int routeStartIndex, int routeLength)
+        // 导出本局路线内的段记录 (按索引升序)
+        public List<SplitEntry> Export(string steamId)
         {
-            List<long> result = new List<long>();
-            SortedDictionary<int, long> map = null;
-            bool hasMap = false;
-            if (!string.IsNullOrEmpty(steamId))
-            {
-                hasMap = _splits.TryGetValue(steamId, out map);
-            }
+            List<SplitEntry> result = new List<SplitEntry>();
+            SortedDictionary<int, SplitEntry> map;
+            if (string.IsNullOrEmpty(steamId) || !_splits.TryGetValue(steamId, out map)) return result;
 
-            int start = routeStartIndex >= 0 ? routeStartIndex : 0;
+            int start = _routeStartIndex < 0 ? 0 : _routeStartIndex;
+            int end = _routeEndIndex;
 
-            if (routeLength > 0)
+            foreach (KeyValuePair<int, SplitEntry> kv in map)
             {
-                for (int i = 0; i < routeLength; i++)
-                {
-                    long ms = 0;
-                    if (hasMap && map != null) map.TryGetValue(start + i, out ms);
-                    result.Add(ms);
-                }
-                return result;
-            }
-
-            // 未知长度 (routeLength <= 0): 从本局路线起点开始导出
-            if (!hasMap || map == null || map.Count == 0) return result;
-            int startIndex = routeStartIndex >= 0 ? routeStartIndex : 0;
-            int maxIndex = startIndex;
-            foreach (KeyValuePair<int, long> kv in map)
-            {
-                if (kv.Key > maxIndex) maxIndex = kv.Key;
-            }
-            for (int i = startIndex; i <= maxIndex; i++)
-            {
-                long ms = 0;
-                map.TryGetValue(i, out ms);
-                result.Add(ms);
+                if (kv.Key < start) continue;
+                if (end >= 0 && kv.Key > end) continue;
+                result.Add(kv.Value);
             }
             return result;
         }
 
-        // 该玩家是否真的点亮过任何一段 (用于判断是否需要显示空状态)
-        public bool HasAnyRecord(string steamId)
+        // 取某段 (按路线内相对序号) 的记录
+        public bool TryGetRelative(string steamId, int relativeIndex, out SplitEntry entry)
         {
-            SortedDictionary<int, long> map;
-            return !string.IsNullOrEmpty(steamId) && _splits.TryGetValue(steamId, out map) && map.Count > 0;
+            entry = new SplitEntry();
+            List<SplitEntry> list = Export(steamId);
+            if (relativeIndex < 0 || relativeIndex >= list.Count) return false;
+            entry = list[relativeIndex];
+            return true;
         }
     }
 }
