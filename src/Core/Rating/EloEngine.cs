@@ -1,0 +1,199 @@
+using System;
+
+namespace PeakCSR
+{
+    // ELO 纯函数引擎 (原 EloCalculator 静态算分逻辑收口, 零 UnityEngine 依赖)
+    // 所有参数取自 RatingRules (shared/rating-rules.json), 口径与 Cloudflare Worker 完全一致
+    public static class EloEngine
+    {
+        private static readonly RatingRules R = RatingRules.Instance;
+
+        public const int MinSeedElo = 850;      // 与 R.Seed.Min 同值, 保留常量便于外部引用
+        public const int MaxSeedElo = 1500;
+        public const int PlacementMatchesCount = 10;
+        public const double EloScaleDenominator = 550.0;
+        public const double TenderfootMultiplier = 0.75;
+        // 达到该分段后获胜保底减半, 避免天阶高倍率下"赢一局抵输七局"
+        public const int HighEloFloorHalveThreshold = 1650;
+        public const int HighEloFloorCap = 12;
+
+        private static int Clamp(int v, int min, int max)
+        {
+            if (v < min) return min;
+            if (v > max) return max;
+            return v;
+        }
+
+        private static float Clamp01(float v)
+        {
+            if (v < 0f) return 0f;
+            if (v > 1f) return 1f;
+            return v;
+        }
+
+        // 天阶 0~8 对应的手工定制难度倍率表 (A-1 菜鸟新人单独按 0.75x 处理)
+        public static double GetAscentMultiplier(int ascent)
+        {
+            int clamped = Clamp(ascent, -1, 8);
+            if (clamped < 0) return R.TenderfootMultiplier;
+            double[] table = R.AscentMultipliers;
+            if (table == null || clamped >= table.Length) return 1.0;
+            return table[clamped];
+        }
+
+        // 计算模式与天阶难度 ELO 倍率：菜鸟新人(A-1)为 0.75x，全山顶峰(A0)为基准 1.00x，
+        // 天阶 1~8 递增，单群系冲刺乘 0.22x
+        public static double GetModeMultiplier(McsrRuleFormat format, int ascent)
+        {
+            double ascentMult = GetAscentMultiplier(ascent);
+            if (format == McsrRuleFormat.BiomeSprint)
+            {
+                return Math.Round(R.BiomeSprintFactor * ascentMult, 2);
+            }
+            return ascentMult;
+        }
+
+        // 获胜保底分: 全山/硬核 8 x 天阶倍率(四舍五入), 单群系 2 x 天阶倍率(向下取整)
+        // 这是一个"绝对下限", 不再被赛制倍率二次乘掉
+        //   全山:  A-1 → +6,  A0 → +8,  A2 → +9,  A5 → +11, A8 → +14
+        //   单群系: A-1 → +1,  A0 → +2,  A6 → +3,  A8 → +3
+        // 1650+ 高端分段先把保底钳制到 12, 避免顶端出现刷分情况
+        public static int GetMinWinDelta(McsrRuleFormat format, int ascent, int currentElo)
+        {
+            double ascentMult = GetAscentMultiplier(ascent);
+            int baseMin = format == McsrRuleFormat.BiomeSprint ? R.WinFloorSection.BiomeSprint : R.WinFloorSection.FullPeak;
+            double scaled = baseMin * ascentMult;
+            int result = format == McsrRuleFormat.BiomeSprint
+                ? (int)Math.Floor(scaled)
+                : (int)Math.Round(scaled, MidpointRounding.AwayFromZero);
+            if (currentElo >= R.HighFloor.Threshold)
+            {
+                if (result > R.HighFloor.WinCap) result = R.HighFloor.WinCap;
+            }
+            if (result < 1) result = 1;
+            return result;
+        }
+
+        // 落败扣分上限 (负数): 单群系最多 -1, 其余最多 -2
+        public static int GetMaxLossDelta(McsrRuleFormat format)
+        {
+            return format == McsrRuleFormat.BiomeSprint ? R.LossCapSection.BiomeSprint : R.LossCapSection.FullPeak;
+        }
+
+        public static int GetBaseKFactor(int totalGames, int currentElo)
+        {
+            if (totalGames < R.PlacementMatches) return R.K.Placement;
+            if (currentElo >= R.HighFloor.Threshold) return R.K.HighElo;
+            return R.K.Regular;
+        }
+
+        // 软折算公式：1000 + (原版ELO - 1000) * 0.5，限制在 850 ~ 1500 之间
+        public static int ComputeSoftResetSeedElo(int vanillaElo)
+        {
+            int soft = (int)Math.Round(R.Seed.VanillaBase + (vanillaElo - R.Seed.VanillaBase) * R.Seed.VanillaWeight);
+            if (soft < R.Seed.Min) soft = R.Seed.Min;
+            if (soft > R.Seed.Max) soft = R.Seed.Max;
+            return soft;
+        }
+
+        // 计算攀爬完成度与高度差修正 (MCSR 理念：定级赛与常规赛根据爬升完成度与双方进度差给予补偿)
+        public static int ComputeProgressModifier(
+            double actualScore,
+            float selfProgress01,
+            float oppProgress01,
+            McsrRuleFormat format,
+            int ascent,
+            bool isPlacement,
+            double antiBoostWeight)
+        {
+            if (antiBoostWeight <= 0.01) return 0;
+
+            float myP = Clamp01(selfProgress01);
+            float oppP = Clamp01(oppProgress01);
+            float diff = myP - oppP;
+
+            RatingRules.ProgressCompensation pc = R.Progress;
+            double scale = format == McsrRuleFormat.BiomeSprint ? pc.SprintScale : 1.0;
+            if (ascent < 0) scale *= pc.TenderfootScale;
+
+            double bonus = 0.0;
+            if (actualScore > 0.75)
+            {
+                // 胜方：若大幅领先对手登顶 (如对手还在半山腰)，额外奖励最多 +4 分 (定级 +6)
+                double leadMax = isPlacement ? pc.LeadBonus.Placement : pc.LeadBonus.Regular;
+                bonus = Math.Max(0.0, diff) * leadMax * scale;
+            }
+            else if (actualScore < 0.25)
+            {
+                // 败方补偿：定级期重点看完成度！爬到 80%~100% 惜败与 5% 暴毙天差地别
+                // 1) 自身完成度减免：爬过 30% 后按完成度减免扣分，定级期最高可补回 +12 分，常规期最高 +6 分
+                double completionReliefMax = isPlacement ? pc.CompletionRelief.Placement : pc.CompletionRelief.Regular;
+                double completionFactor = Clamp01((float)((myP - pc.CompletionStart) / pc.CompletionSpan));
+                double relief = completionFactor * completionReliefMax;
+
+                // 2) 双方高度差修正：若败方惜败（进度差很小甚至领先时暴毙），少扣；若被完全碾压（落后 >60%）且定级期完不成 20%，略微多扣
+                double gapTerm = diff * (isPlacement ? pc.GapTerm.Placement : pc.GapTerm.Regular);
+                bonus = (relief + gapTerm) * scale;
+            }
+
+            int rounded = (int)Math.Round(bonus * antiBoostWeight);
+            int maxCap = isPlacement ? pc.Cap.Placement : pc.Cap.Regular;
+            if (rounded < -maxCap) rounded = -maxCap;
+            if (rounded > maxCap) rounded = maxCap;
+            return rounded;
+        }
+
+        // 计算最终 ELO 变动
+        //   weightFactor    : antiBoostWeight * modeMultiplier, 只作用于基础分 (不污染保底)
+        //   antiBoostWeight : 仅用于判断是否应当施加保底/上限 (练习赛、自建小号、防刷分时不施加)
+        //   minWinDelta     : GetMinWinDelta 预先算好的绝对保底下限
+        //   maxLossDelta    : GetMaxLossDelta 预先算好的绝对扣分上限 (负数)
+        public static int ComputeDelta(
+            int myElo,
+            int opponentElo,
+            double actualScore,
+            int kFactor,
+            double weightFactor,
+            double antiBoostWeight,
+            int minWinDelta,
+            int maxLossDelta,
+            int progressBonus,
+            out int baseDeltaOut)
+        {
+            double expected = 1.0 / (1.0 + Math.Pow(10.0, (opponentElo - myElo) / R.Elo.ScaleDenominator));
+            int rawBase = (int)Math.Round(kFactor * (actualScore - expected) * weightFactor);
+
+            if (antiBoostWeight > 0.01)
+            {
+                if (actualScore > 0.75)
+                {
+                    if (rawBase < minWinDelta) rawBase = minWinDelta;
+                }
+                else if (actualScore < 0.25 && rawBase >= 0)
+                {
+                    rawBase = -1;
+                }
+            }
+
+            baseDeltaOut = rawBase;
+            int total = rawBase + progressBonus;
+
+            if (antiBoostWeight > 0.01)
+            {
+                if (actualScore > 0.75)
+                {
+                    // 保底是绝对下限: 进度补偿为负也不能低于它
+                    if (total < minWinDelta) total = minWinDelta;
+                }
+                else if (actualScore < 0.25)
+                {
+                    // 扣分上限是绝对上限: 无论基础分多低都不能超过它 (即不能扣得比上限更多)
+                    int capped = Math.Max(maxLossDelta, Math.Min(0, total));
+                    total = capped;
+                }
+            }
+
+            return total;
+        }
+    }
+}
