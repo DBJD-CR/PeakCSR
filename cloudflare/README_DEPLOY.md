@@ -16,15 +16,31 @@
 
 ---
 
-## 第二步：创建 Cloudflare Worker 并粘贴代码（1 分钟）
+## 第二步：部署 Worker 代码（1 分钟）
+
+> Worker 已模块化 (`cloudflare/src/` 下按 handlers / domain / db / lib 分层)，
+> 评分参数直接 import 仓库根目录的 [`shared/rating-rules.json`](../shared/rating-rules.json)
+> 单一事实源，因此推荐用 wrangler 命令行部署（在线编辑器无法粘贴多文件模块）。
+
+**方式 A：wrangler 命令行（推荐）**
+
+```powershell
+cd cloudflare
+npm install            # 首次需要
+npx wrangler deploy
+```
+
+**方式 B：在线编辑器单文件拼接**
 
 1. 在左侧菜单栏点击 **计算 (Workers & Pages)** -> **概览 (Overview)**。
 2. 点击右上角 **创建 (Create)** -> 选择 **创建 Worker (Create Worker)**：
    - 名称填：`peakcsr-ladder`
    - 点击右下角 **部署 (Deploy)**。
 3. 部署成功后，点击右上角的 **编辑代码 (Edit code)** 进入在线编辑器：
-   - 把左侧编辑器里自带的 `worker.js` 默认代码**全部删光**；
-   - 打开咱们仓库里的 [`cloudflare/worker.js`](worker.js) 文件，全选复制粘贴进去；
+   - 把编辑器里自带的默认代码**全部删光**；
+   - 按顺序把 `src/index.js` 引用的各模块内容与 `src/index.js` 合并成一个文件粘贴进去
+     （把 `import` 段替换为各文件的常量与函数定义，把 `import rules from ... rating-rules.json`
+     替换为 `const rules = { ... }` 字面量，内容从 [`shared/rating-rules.json`](../shared/rating-rules.json) 复制）；
    - 点击右上角的 **部署 (Deploy)** 保存代码！
 
 ---
