@@ -259,6 +259,10 @@ namespace PeakCSR
         {
             RefreshSelection();
             RefreshDynamic();
+
+            // 打开/刷新面板时顺手把待补传战报推一次
+            LadderSyncService sync = LadderSyncService.Instance;
+            if (sync != null) sync.DrainPendingReports();
         }
 
         private void RefreshSelection()
