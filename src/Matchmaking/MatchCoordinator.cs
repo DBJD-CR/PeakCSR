@@ -132,6 +132,8 @@ namespace PeakCSR
             int floorAdjust = appliedDelta - baseDelta - progressBonus;
 
             _store.Save(rec);
+            // 本地结算同样改动了权威记录，推进修订号
+            _ratingRevision++;
             EventBus.PublishRatingChanged();
 
             return new SettlementDetail
@@ -726,12 +728,9 @@ public bool ApplyCloudAuthoritativeState(
                 return;
             }
 
-            // 房间回来了: 必须连接真的恢复才能撤销观察窗, 否则只是拿到了本地缓存的旧快照
-            if (s.ObservingDisconnect && Guardian.IsLocalConnectivityHealthy(s))
+            // 房间回来了: 与 guardian tick 用同一套恢复证据 (实时连接 + 未完赛房间)
+            if (Guardian.TryRecoverFromObservation(s, race))
             {
-                s.ObservingDisconnect = false;
-                s.DisconnectReason = "";
-                Guardian.ClearDisconnectFreeze(s);
                 PcsrLog.LogInfo("[PeakCSR] 观察窗内房间已恢复，继续对局。");
             }
 
@@ -795,13 +794,22 @@ public bool ApplyCloudAuthoritativeState(
             }
 
             // 对手宣告登顶: 记录用时, 胜负交给 ArbitratePeak 统一裁定
+            // 只有本地比赛真的跑起来 (Running) 才允许它参与裁定
+            // 赛前状态收到 PEAK 只做记录, 由 TickActiveSession 在进入 Running 后统一裁决
             if (packet.Kind == PcsrPacketKind.Peak)
             {
                 if (s.State != CsMatchState.Finished && !s.OutcomeDecided && packet.HasPeakMs)
                 {
-                    PcsrLog.LogInfo("[PeakCSR] 收到对手登顶宣告: " + s.OpponentName + " 用时 " + packet.PeakMs + "ms。");
+                    PcsrLog.LogInfo("[PeakCSR] 收到对手登顶宣告: " + s.OpponentName + " 用时 " + packet.PeakMs + "ms (当前状态 " + s.State + ")。");
                     s.NoteOpponentPeak(packet.PeakMs);
-                    Settlement.ArbitratePeak(s);
+                    if (s.State == CsMatchState.Running)
+                    {
+                        Settlement.ArbitratePeak(s);
+                    }
+                    else
+                    {
+                        PcsrLog.LogInfo("[PeakCSR] 本地比赛尚未进入 Running，PEAK 仅记录不裁定，稍后统一仲裁。");
+                    }
                 }
                 return;
             }
