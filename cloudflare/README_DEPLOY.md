@@ -73,24 +73,34 @@ npx wrangler deploy
 
 ---
 
-## 第三步补充 2：重建数据表（本轮改动必须做一次）
+## 第三步补充 2：数据表升级（存量库必须做一次）
 
-本轮把 `settled_matches` 的主键从 `invite_code` 改成了 `match_key`（= `invite_code|seed`），
-并给 `players` 增加了分赛制战绩等字段。目前还在测试期，直接重建最省事：
+新库直接执行 [`schema.sql`](schema.sql) 即可。**已建过表的老库必须做一次增量升级**，
+否则 `match_reports.route` / `settled_matches.route` 这两列缺失会让上报与历史查询直接报错。
+注意 `schema.sql` 用的是 `CREATE TABLE IF NOT EXISTS`，重跑**不会**给已有表补列。
 
-1. 进入 D1 数据库 `peakcsr-db` 的 **控制台 (Console)**。
-2. 依次执行（清空旧表）：
+在 D1 数据库 `peakcsr-db` 的 **控制台 (Console)** 依次执行：
+**这是推荐做法，不需要清空任何数据。**
 
-   ```sql
-   DROP TABLE IF EXISTS settled_matches;
-   DROP TABLE IF EXISTS match_reports;
-   DROP TABLE IF EXISTS players;
-   DROP TABLE IF EXISTS admin_audit;
-   ```
+```sql
+-- 存量库补齐本轮新增列 (已有可忽略报错)
+ALTER TABLE match_reports ADD COLUMN route INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE settled_matches ADD COLUMN route INTEGER NOT NULL DEFAULT 0;
+```
 
-3. 重新全选粘贴 [`schema.sql`](schema.sql) 并执行。
-
-> 不重建也能跑，但旧表的 `settled_matches` 结构对新代码不兼容，会出现结算报错。
+> 只有主键结构从 `invite_code` 换成 `match_key` 的那次历史改造需要重建表；
+> 之后的本轮改动**都可以通过上面的 ALTER 平滑升级**，不必 DROP 任何表。
+>
+> 如果确实想从零开始（测试期清库），再按下面顺序执行：
+>
+> ```sql
+> DROP TABLE IF EXISTS settled_matches;
+> DROP TABLE IF EXISTS match_reports;
+> DROP TABLE IF EXISTS players;
+> DROP TABLE IF EXISTS admin_audit;
+> ```
+>
+> 然后重新全选粘贴 [`schema.sql`](schema.sql) 执行。
 
 ---
 
