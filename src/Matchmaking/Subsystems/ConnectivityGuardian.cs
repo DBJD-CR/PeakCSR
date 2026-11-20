@@ -134,10 +134,14 @@ namespace PeakCSR
 
         // ===== 断线观察窗 =====
         // race 消失不等于判负: 掉线/被踢/换房/socket 看门狗都会让 CurrentRace 变 null
-        public void BeginDisconnectObservation(MatchSession session, string reason)
+        // requireLiveEvidence: 本局从未建立过实时通道时置 true。
+        // 此时 Photon 健康不能当作"恢复"证据 (Photon 本来就没断),
+        // 只有实时通道真的连上 (LiveEverConnected) 才允许撤销观察窗。
+        public void BeginDisconnectObservation(MatchSession session, string reason, bool requireLiveEvidence = false)
         {
             if (session.ObservingDisconnect) return;
             session.ObservingDisconnect = true;
+            session.ObservationNeedsLiveEvidence = requireLiveEvidence;
             session.DisconnectObserveUntil = Time.realtimeSinceStartup + MatchSession.DisconnectObserveSeconds;
             session.DisconnectReason = reason ?? "";
             session.StatusMessage = CsrLoc.T("status.reconnecting", Mathf.CeilToInt(MatchSession.DisconnectObserveSeconds));
@@ -155,9 +159,11 @@ namespace PeakCSR
             try
             {
                 RankedPeak.Services.RaceInfo race = _gw.CurrentRace;
-                if (race != null && race.Status != "finished" && IsLocalConnectivityHealthy(session))
+                if (race != null && race.Status != "finished"
+                    && IsRecoveryEvidenced(session) && IsLocalConnectivityHealthy(session))
                 {
                     session.ObservingDisconnect = false;
+                    session.ObservationNeedsLiveEvidence = false;
                     session.DisconnectReason = "";
                     ClearDisconnectFreeze(session);
                     PcsrLog.LogInfo("[PeakCSR] 观察窗内连接已恢复，继续对局，不做任何结算。");
@@ -176,8 +182,14 @@ namespace PeakCSR
             }
 
             session.ObservingDisconnect = false;
+            session.ObservationNeedsLiveEvidence = false;
             PcsrLog.LogWarning("[PeakCSR] 观察窗到期仍未恢复，本局作废（双方不计分、不计胜负）。");
             _owner.Settlement.ConcludeVoid(session, CsrLoc.T("status.void_disconnect", session.DisconnectReason));
+        }
+        private bool IsRecoveryEvidenced(MatchSession session)
+        {
+            if (!session.ObservationNeedsLiveEvidence) return true;
+            return session.LiveEverConnected || _gw.LiveConnected;
         }
 
         // 观察窗内连接恢复时解除冻结, 让对局可以正常继续
