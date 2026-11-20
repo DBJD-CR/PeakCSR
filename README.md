@@ -26,4 +26,8 @@
 ## 依赖
 
 - `BepInEx-BepInExPack_PEAK`
-- `PeakCode-PEAK_RANKED`（PeakCSR 强依赖其 `RaceService`、`RaceLiveConnection`、`NativeUiFactory` 等原生 UI/服务组件）
+- `PeakCode-PEAK_RANKED`（PeakCSR 强依赖其原生 UI 和服务组件）
+
+---
+
+PeakCSR is an independent add-on mod and is not affiliated with or endorsed by ThomasAusHH (author of PEAK RANKED) or Landfall. All credit for the underlying Live Race infrastructure belongs to ThomasAusHH.

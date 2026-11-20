@@ -39,17 +39,42 @@
 
 ---
 
-## 第三步补充：配置上游 API 密钥（可选但推荐）
+## 第三步补充：配置两个机密变量（强烈推荐）
 
-「原版后端交叉验证」通道需要向 RANKED 官方后端发起查询，该密钥**绝不能写进代码**（仓库是公开的），必须用 Worker 的加密变量注入：
+仓库是公开的，**所有密钥都必须用 Worker 的加密变量注入，绝不能写进代码**。
 
-1. 在 Worker 详情页进入 **设置 (Settings)** -> **变量和机密 (Variables and Secrets)**。
-2. 点击 **添加 (Add)** -> 类型选择 **机密 (Secret)**：
-   - 名称填：`UPSTREAM_API_KEY`
-   - 值填你自己的 RANKED 后端 API Key
-3. 保存并 **部署 (Deploy)**。
+在 Worker 详情页进入 **设置 (Settings)** -> **变量和机密 (Variables and Secrets)**，点击 **添加 (Add)** -> 类型选 **机密 (Secret)**，逐个添加：
 
-> 不配置也能正常运行：此时仅使用「双端签名共识」判定，双方都上报且胜利者一致才结算；配置后会额外启用官方后端的权威交叉验证，可防止一方强退逃单。
+| 名称 | 用途 | 不配置的后果 |
+| --- | --- | --- |
+| `UPSTREAM_API_KEY` | 「原版 RANKED 后端交叉验证」通道，防止一方强退逃单 | 只走「双端签名共识」，双方都上报且胜利者一致才结算 |
+| `ADMIN_TOKEN` | 后台后门 `/api/admin`，人工处理恶意拔线 / 误判纠正 | `/api/admin` 全部返回 403，后门关闭 |
+
+添加完点击 **部署 (Deploy)**。
+
+> `ADMIN_TOKEN` 自己随便生成一串长随机字符串即可（例如 `openssl rand -hex 24` 的结果），
+> 之后调用后台接口时放在请求头 `X-Admin-Token` 里。
+
+---
+
+## 第三步补充 2：重建数据表（本轮改动必须做一次）
+
+本轮把 `settled_matches` 的主键从 `invite_code` 改成了 `match_key`（= `invite_code|seed`），
+并给 `players` 增加了分赛制战绩等字段。目前还在测试期，直接重建最省事：
+
+1. 进入 D1 数据库 `peakcsr-db` 的 **控制台 (Console)**。
+2. 依次执行（清空旧表）：
+
+   ```sql
+   DROP TABLE IF EXISTS settled_matches;
+   DROP TABLE IF EXISTS match_reports;
+   DROP TABLE IF EXISTS players;
+   DROP TABLE IF EXISTS admin_audit;
+   ```
+
+3. 重新全选粘贴 [`schema.sql`](schema.sql) 并执行。
+
+> 不重建也能跑，但旧表的 `settled_matches` 结构对新代码不兼容，会出现结算报错。
 
 ---
 
@@ -57,3 +82,89 @@
 
 1. 在 `peakcsr-ladder` 页面顶部，复制你的专属免费地址（长得像 `https://peakcsr-ladder.你的名字.workers.dev`）。
 2. 打开 `C:\Users\ASUS\AppData\Roaming\Thunderstore Mod Manager\DataFolder\PEAK\profiles\RANKED\BepInEx\config\com.peakcsr.ranked1v1.cfg`（或者直接在 [`src/Plugin.cs`](../src/Plugin.cs) 的默认值里填入），将 `CloudApiUrl` 设置为该地址即可！
+
+---
+
+## 第五步：核对接口是否正常（自检）
+
+部署后直接用浏览器打开下面两个地址，都应该返回 JSON 而不是错误页：
+
+- `https://你的地址/api/leaderboard?limit=5` → `{"ok":true,...}`
+- `https://你的地址/api/profile?steamId=你的SteamID64` → `{"ok":true,...}`
+
+后台后门自检（PowerShell）：
+
+```powershell
+$body = @{ action = "reset"; note = "self check" } | ConvertTo-Json
+Invoke-RestMethod -Uri "https://你的地址/api/admin" -Method Post `
+  -ContentType "application/json" `
+  -Headers @{ "X-Admin-Token" = "你设置的ADMIN_TOKEN" } `
+  -Body $body
+```
+
+后台可用动作：
+
+| action | 参数 | 说明 |
+| --- | --- | --- |
+| `recent` | `limit`（可选，默认 20） | 列出最近结算的对局，用来找要作废的 `matchKey` |
+| `void` | `matchKey`，或 `inviteCode` + `seed` | 作废某场对局，回滚双方 ELO 与胜负场次 |
+| `set-elo` | `steamId`、`elo` | 直接改某人的 ELO（会同时更新 Peak） |
+| `reset` | 无 | 清空所有对局与战绩，保留玩家档案 |
+| `wipe` | 无 | 连玩家档案一起清空 |
+
+所有后台操作都会写入 `admin_audit` 表留痕。
+
+### 用脚本操作（推荐，不用手写 JSON）
+
+仓库里带了 [`tools/pcsr-admin.ps1`](../tools/pcsr-admin.ps1)，先把 token 放进环境变量（只在本窗口生效，不会写进任何文件）：
+
+```powershell
+$env:PCSR_ADMIN_TOKEN = "你设置的ADMIN_TOKEN"
+```
+
+然后在**仓库根目录**执行：
+
+```powershell
+# 1) 看最近 20 场结算，找到要处理的那一行
+.\tools\pcsr-admin.ps1 -Action recent
+
+# 2) 作废某一场（推荐：直接用 recent 列出来的 matchKey）
+.\tools\pcsr-admin.ps1 -Action void -MatchKey "SPY4NQ|761912949" -Note "对手拔线，人工回滚"
+
+# 2b) 也可以给房间号 + 种子，脚本自己拼 matchKey
+.\tools\pcsr-admin.ps1 -Action void -InviteCode SPY4NQ -Seed 761912949
+
+# 3) 手动修正某人分数
+.\tools\pcsr-admin.ps1 -Action set-elo -SteamId 76561198000000000 -Elo 1443 -Note "误扣分回补"
+
+# 4) 测试期清库（保留玩家档案，清零战绩与对局）
+.\tools\pcsr-admin.ps1 -Action reset
+
+# 5) 彻底清空（连玩家档案一起删，需要手动输入 WIPE 确认）
+.\tools\pcsr-admin.ps1 -Action wipe
+```
+
+> **典型场景：某玩家被网络问题误扣分**
+>
+> 1. `-Action recent` 找到那一局的 `matchKey`
+> 2. `-Action void -MatchKey "..."` → 双方 ELO 与胜负场次一起回滚，对局标记为 `is_void`
+> 3. 玩家下次进游戏，客户端会从云端拉回正确的权威分数
+>
+> **典型场景：确认某人恶意拔线**
+> 直接 `-Action void` 把该局作废（双方都不扣分），然后按社区规则线下处理，
+> 后续可再加人工封禁表，不需要改评分算法误伤所有掉线玩家。
+
+---
+
+## 附：实时日志窗口
+
+游戏进程本身没有控制台窗口，日志只写进 `BepInEx/LogOutput.log`。
+本插件内置了一个日志跟随窗口，配置在 `com.peakcsr.ranked1v1.cfg` 的 `[Logging]` 段：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AutoOpenLogWindow` | `true` | 启动游戏时自动弹一个独立终端，实时 tail 日志文件 |
+| `LogWindowFilterPeakCsr` | `true` | 只显示含 `[PeakCSR]` 的行，关掉则显示完整日志 |
+| `LogWindowHotkey` | `F9` | 配合 **Ctrl** 使用，即 `Ctrl + F9` 开关日志窗口 |
+
+> 想看原版 RANKED 的日志就把 `LogWindowFilterPeakCsr` 设为 `false`。
