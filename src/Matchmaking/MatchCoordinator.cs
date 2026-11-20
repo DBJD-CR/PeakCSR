@@ -127,6 +127,10 @@ namespace PeakCSR
                 rec.ApplyUnratedResult(delta);
             }
 
+            // 落地后的真实变化: 战报与云端历史都必须记录"实际发生了多少"
+            int appliedDelta = rec.Elo - oldElo;
+            int floorAdjust = appliedDelta - baseDelta - progressBonus;
+
             _store.Save(rec);
             EventBus.PublishRatingChanged();
 
@@ -134,10 +138,10 @@ namespace PeakCSR
             {
                 OldElo = oldElo,
                 NewElo = rec.Elo,
-                TotalDelta = delta,
+                TotalDelta = appliedDelta,
                 BaseDelta = baseDelta,
                 ProgressBonus = progressBonus,
-                FloorAdjust = delta - baseDelta - progressBonus,
+                FloorAdjust = floorAdjust,
                 MinWinDelta = minWinDelta,
                 ModeMultiplier = modeMult,
                 AntiBoostWeight = antiBoostWeight,
@@ -177,21 +181,29 @@ namespace PeakCSR
         {
             _record.ApplyCloudAuthoritativeElo(cloudElo);
             _store.Save(_record);
+            // 每次权威分落地都推进一次修订号
+            _ratingRevision++;
             EventBus.PublishRatingChanged();
         }
 
+        // 评分修订号: 递增即代表本地权威分发生了变化
+        public int RatingRevision { get { return _ratingRevision; } }
+        private int _ratingRevision;
+
         // 云端权威档案覆盖 (含分赛制战绩)
+        // draws: 云端平局数, 传 -1 表示本次没有拿到权威档案
         public void ApplyCloudAuthoritativeState(
-            int elo, int peak, int wins, int losses, int streak,
+            int elo, int peak, int wins, int losses, int draws, int streak,
             int winsAllPeak, int lossesAllPeak,
             int winsHardcore, int lossesHardcore,
             int winsSprint, int lossesSprint,
             int favoriteMap, int favoriteAscent, int favoriteFormat)
         {
-            _record.ApplyCloudAuthoritativeState(elo, peak, wins, losses, streak,
+            _record.ApplyCloudAuthoritativeState(elo, peak, wins, losses, draws, streak,
                 winsAllPeak, lossesAllPeak, winsHardcore, lossesHardcore, winsSprint, lossesSprint,
                 favoriteMap, favoriteAscent, favoriteFormat, PcsrBiomes.Count);
             _store.Save(_record);
+            _ratingRevision++;
             EventBus.PublishRatingChanged();
         }
 
@@ -525,6 +537,8 @@ namespace PeakCSR
             // 串行化: 若已有过渡动作在飞 (加入/退房/换房), 先等它结束, 避免 join 与 leave 响应乱序互相覆盖
             if (s != null && s.TransitionInFlight && Time.realtimeSinceStartup < s.TransitionDeadline)
             {
+                // 记下离开意图
+                s.PendingLeaveRequest = true;
                 s.StatusMessage = CsrLoc.T("status.leaving");
                 s.Notify();
                 return;
@@ -551,8 +565,9 @@ namespace PeakCSR
             _currentSession.StrictRulesetJoin = strictRuleset;
             _currentSession.PendingFormat = format;
             _currentSession.PendingAscent = RoomMagicCodec.ClampAscent(ascent);
-            // 开新局前重置进度修正状态与原版分段兜底 (原 ResetMatchRuntime 中的全局清理职责)
+            // 开新局前重置进度修正状态、分段采集游标与原版分段兜底
             ProgressMonotonicState.Reset();
+            SplitCapturePatch.ResetTracking();
             Gateway.ClearLiveSplits();
         }
 
@@ -595,6 +610,8 @@ namespace PeakCSR
         public void OnRaceJoined(MatchSession session, RaceInfo race)
         {
             if (race == null) return;
+            // 迟到的 join 结果: 玩家已经开了新会话, 旧结果不拿来处理 (幽灵房分支会顺手拆掉新会话)
+            if (session != null && !ReferenceEquals(session, _currentSession)) return;
 
             // 幽灵房防护: 通过大厅/邀请码进来时, 只接受还在 lobby 状态的房间。
             // 掉线遗留的公开房在服务端可能仍是 "1/2 等待中", 只有真正 join 进来才看得到 status,
@@ -819,6 +836,14 @@ namespace PeakCSR
         {
             if (s.StartCountdownUntil < 0f) return;
 
+            // 对手掉了/换了人: 倒计时作废, 等新的握手完成再重来
+            if (!s.OpponentVerified || string.IsNullOrEmpty(s.OpponentSteamId))
+            {
+                s.StartCountdownUntil = -1f;
+                s.HostStartRequested = false;
+                return;
+            }
+
             float remain = s.StartCountdownUntil - Time.realtimeSinceStartup;
             if (remain > 0f)
             {
@@ -857,10 +882,6 @@ namespace PeakCSR
                     NotifyStateChanged();
                     TryRecoverLoading(s);
                 }
-            }
-            else
-            {
-                s.LoadingSince = -1f;
             }
         }
 
@@ -941,6 +962,20 @@ namespace PeakCSR
             MatchSession s = _currentSession;
             if (s == null) return;
 
+            // 记录实时 socket 首次可用的时刻, 握手的宽限期从这里起算
+            if (s.LiveConnectedSince < 0f && Gateway.LiveConnected) s.LiveConnectedSince = Time.realtimeSinceStartup;
+
+            // 过渡动作期间记下的离开意图: 过渡结束 (或超时作废) 后立刻执行
+            if (s.PendingLeaveRequest
+                && (!s.TransitionInFlight || Time.realtimeSinceStartup >= s.TransitionDeadline))
+            {
+                s.PendingLeaveRequest = false;
+                s.TransitionInFlight = false;
+                PcsrLog.LogInfo("[PeakCSR] 执行过渡期间记下的离开请求。");
+                LeaveMatch();
+                return;
+            }
+
             _phaseMachine.Tick(s);
 
             // 本机登顶判胜兜底: 游戏本体 stats.won 与结算画面 banner 同源,
@@ -951,7 +986,10 @@ namespace PeakCSR
                 && IsLocalPlayerWonInGame())
             {
                 PcsrLog.LogInfo("[PeakCSR] 检测到游戏本体登顶信号 (stats.won), 服务端快照缺失, 兜底判胜。");
-                double sec = Gateway.TimerState == RankedPeak.Timer.TimerState.Running ? Gateway.TimerElapsedMs / 1000.0 : 0.0;
+                // 用真实完赛用时
+                long elapsedMs = Gateway.TimerElapsedMs;
+                if (elapsedMs <= 0) elapsedMs = (long)((Time.realtimeSinceStartup - s.MatchStartTime) * 1000f);
+                double sec = elapsedMs / 1000.0;
                 Settlement.ConcludeMatch(s, true, CsrLoc.T("status.win.peak", CsrFormat.FormatClock(sec)));
                 return;
             }
