@@ -18,6 +18,8 @@ namespace PeakCSR
         RaceInfo LastFinishedRace { get; }
         long? MsUntilStart { get; }
         RaceParticipant Self { get; }
+        // 房间 AutoEndMs 折算的"约多少秒后自动关房", 用于播报收尾倒计时
+        int AutoEndSecondsApprox { get; }
 
         string GameVersion { get; }
         string MapSetHash { get; }
@@ -52,6 +54,8 @@ namespace PeakCSR
 
         string GetBiomeLabel(int levelIndex);
         string GetSegmentBiomeName(int levelIndex, int segmentIndex);
+        // 按"群系在本座山里的出现序号"(0 起) 查询该群系占用的进度点区间。
+        bool TryGetBiomePointSpan(int biomeOrdinal, out int startIndex, out int count);
         int PickRandomAuthenticLevel(int excludeIndex);
         int SprintBiomeCount();
         List<long> GetLiveSplits(string steamId);
