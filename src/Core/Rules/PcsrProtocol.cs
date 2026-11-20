@@ -13,6 +13,10 @@ namespace PeakCSR
         RerollRoom,
         Void,
         Forfeit,
+        // 我方登顶完赛宣告, 携带真实完赛用时。
+        // 这是唯一可信的胜负依据: 游戏本体 stats.won 只代表"我到终点了",
+        // 不代表"我是第一名", 双方先后点亮篝火时它两边都为 true。
+        Peak,
         Unknown
     }
 
@@ -32,6 +36,9 @@ namespace PeakCSR
         public int LevelIndex;
         public int Route;
         public string RoomCode;
+        // PEAK 载荷: 完赛用时 (毫秒), 双方用它做先后判定
+        public bool HasPeakMs;
+        public long PeakMs;
     }
 
     // __PCSR1V1| 协议编解码统一收口 (取代散落各处的字符串拼接与 Split('|') 分支链)
@@ -67,6 +74,13 @@ namespace PeakCSR
         public static string EncodeRerollRoom(string roomCode, int seed, int levelIndex, int route)
         {
             return PacketPrefix + "REROLL_ROOM|" + roomCode + "|" + seed + "|" + levelIndex + "|" + route;
+        }
+
+        // 登顶宣告: 只带用时, 不带名次 (名次由双方用时比较得出, 不信任单方自述)
+        public static string EncodePeak(long elapsedMs)
+        {
+            if (elapsedMs < 0) elapsedMs = 0;
+            return PacketPrefix + "PEAK|" + elapsedMs;
         }
 
         public static string EncodeVoid()
@@ -121,6 +135,17 @@ namespace PeakCSR
                 packet.Seed = ParseInt(parts[3]);
                 packet.LevelIndex = ParseInt(parts[4]);
                 packet.Route = ParseInt(parts[5]);
+                return true;
+            }
+            if (cmd == "PEAK" && parts.Length >= 3)
+            {
+                packet.Kind = PcsrPacketKind.Peak;
+                long ms;
+                if (long.TryParse(parts[2], out ms))
+                {
+                    packet.HasPeakMs = true;
+                    packet.PeakMs = ms < 0 ? 0 : ms;
+                }
                 return true;
             }
             if (cmd == "VOID")
