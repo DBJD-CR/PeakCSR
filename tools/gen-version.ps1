@@ -4,6 +4,14 @@ param([string]$Manifest, [string]$Output)
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($Manifest)) { $Manifest = Join-Path $repoRoot "manifest.json" }
+if ([string]::IsNullOrWhiteSpace($Output)) { $Output = Join-Path $repoRoot "src\Boot\PluginVersion.g.cs" }
+
+if (-not (Test-Path -LiteralPath $Manifest)) {
+    throw "manifest.json not found: $Manifest"
+}
+
 # Read with explicit UTF8 so BOM-less files are handled the same everywhere
 $raw = [System.IO.File]::ReadAllText($Manifest, [System.Text.Encoding]::UTF8)
 $j = $raw | ConvertFrom-Json

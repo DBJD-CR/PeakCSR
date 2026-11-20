@@ -9,15 +9,22 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
-  <!-- 路径可通过 local.props (gitignore) 或环境变量覆盖, 不再硬编码本地绝对路径 -->
+  <!-- 路径优先级 (与 build.ps1 完全一致): 环境变量 > local.props > 内置默认 -->
+  <!-- 环境变量值先存一份, local.props 导入后再拉回来, 保证环境变量始终优先 -->
   <PropertyGroup>
-    <GameManagedDir Condition="'$(GameManagedDir)' == ''">$(PEAK_MANAGED_DIR)</GameManagedDir>
-    <ProfileDir Condition="'$(ProfileDir)' == ''">$(PEAK_PROFILE_DIR)</ProfileDir>
-    <GameManagedDir Condition="'$(GameManagedDir)' == '' and Exists('local.props')">$(GameManagedDirFromProps)</GameManagedDir>
+    <PcsrProfileDirFromEnv>$(PEAK_PROFILE_DIR)</PcsrProfileDirFromEnv>
+    <PcsrManagedDirFromEnv>$(PEAK_MANAGED_DIR)</PcsrManagedDirFromEnv>
+    <ProfileDir Condition="'$(PcsrProfileDirFromEnv)' != ''">$(PcsrProfileDirFromEnv)</ProfileDir>
+    <GameManagedDir Condition="'$(PcsrManagedDirFromEnv)' != ''">$(PcsrManagedDirFromEnv)</GameManagedDir>
   </PropertyGroup>
 
   <!-- 本地可选覆盖文件 (加入 .gitignore): 定义 GameManagedDir / ProfileDir -->
   <Import Project="local.props" Condition="Exists('local.props')" />
+
+  <PropertyGroup>
+    <ProfileDir Condition="'$(PcsrProfileDirFromEnv)' != ''">$(PcsrProfileDirFromEnv)</ProfileDir>
+    <GameManagedDir Condition="'$(PcsrManagedDirFromEnv)' != ''">$(PcsrManagedDirFromEnv)</GameManagedDir>
+  </PropertyGroup>
 
   <PropertyGroup Condition="'$(GameManagedDir)' == ''">
     <GameManagedDir>E:\steam\steamapps\common\PEAK\PEAK_Data\Managed</GameManagedDir>
@@ -123,10 +130,12 @@
     <PropertyGroup>
       <ManifestFile>$(MSBuildProjectDirectory)\manifest.json</ManifestFile>
       <GeneratedFile>$(MSBuildProjectDirectory)\src\Boot\PluginVersion.g.cs</GeneratedFile>
+      <GenScript>$(MSBuildProjectDirectory)\tools\gen-version.ps1</GenScript>
     </PropertyGroup>
-    <PropertyGroup>
-      <GenCmd>powershell -NoProfile -ExecutionPolicy Bypass -Command ". '$(MSBuildProjectDirectory)\tools\gen-version.ps1' -Manifest '$(ManifestFile)' -Output '$(GeneratedFile)'"</GenCmd>
-    </PropertyGroup>
-    <Exec Condition="Exists('$(ManifestFile)')" Command="$(GenCmd)" />
+    <!-- 用 -File 传脚本, 路径由脚本按 $PSScriptRoot 自行推导:
+         直接把仓库绝对路径拼进命令行时, 路径含空格或单引号 (O'Brien) 都会破坏解析 -->
+    <Exec Condition="Exists('$(ManifestFile)')"
+          WorkingDirectory="$(MSBuildProjectDirectory)\tools"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -File gen-version.ps1" />
   </Target>
 </Project>

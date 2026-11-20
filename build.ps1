@@ -19,13 +19,17 @@ function Copy-WithRetry {
     }
 }
 $BinDir      = Join-Path $ProjectRoot "bin"
-# Profile 路径可被环境变量 PEAK_PROFILE_DIR 或 local.props 覆盖 (csproj 同步该逻辑)
+# Profile 路径优先级必须与 csproj 一致: 环境变量 > local.props > 内置默认
 $ProfileRoot = $env:PEAK_PROFILE_DIR
 if ([string]::IsNullOrWhiteSpace($ProfileRoot)) {
     $propsFile = Join-Path $ProjectRoot "local.props"
     if (Test-Path $propsFile) {
         Get-Content $propsFile | ForEach-Object {
-            if ($_ -match "<ProfileDir>(.+)</ProfileDir>") { $ProfileRoot = $Matches[1].Trim() }
+            if ($_ -match "<ProfileDir>(.+)</ProfileDir>") {
+                # local.props 是 XML: 路径里的 & 会写成 &, 必须按 XML 解码后再用,
+                # 否则会创建出 "A&B" 这种实际不存在的目录, 插件永远部署不到选中的 profile
+                $ProfileRoot = [System.Net.WebUtility]::HtmlDecode($Matches[1].Trim())
+            }
         }
     }
 }
