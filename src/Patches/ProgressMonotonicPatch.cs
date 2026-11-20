@@ -5,23 +5,25 @@ using UnityEngine;
 
 namespace PeakCSR
 {
-    // 修正 RANKED 原生 RaceProgress 的两个进度计算缺陷
+    // 修正 RANKED 原生 RaceProgress 的进度跳变与结算失真
     //
-    // 1) 全山模式: 进度 = (段索引 + 段内插值) / 总段数。点亮一次篝火时
-    //    MountainProgressHandler.SetSegmentComplete 把 maxProgressPointReached 加 1,
-    //    段内插值从 1 归零、段索引 +1, 于是画面瞬间跳 1/总段数。
-    //    全山约 25 个进度点 → 正好 +4%。这就是"水平垂直位置没变, 进度却瞬间涨 4%"的原因。
+    // 治本点 (不是平滑遮盖):
+    //   RANKED 的 RawProgress() 用 maxProgressPointReached 这个离散索引定区间:
+    //       return (maxProgressPointReached + 段内插值) / last
+    //   而 maxProgressPointReached 会被 MapHandler 切段协程里的
+    //       SetSegmentComplete(startSegment + 1)
+    //   提前推高。索引一涨, 段内插值就按"新段"重算, 于是进度凭空 +1/last
+    //   (全山约 25 点 → 正好 4%)。单群系更糟: _singleSegment 直接返回段内插值,
+    //   开局站在段末就是 100%, 越过该点后崩回 0%。
     //
-    // 2) 单群系模式: 返回值只有段内插值, 但段索引用的是整座山的绝对索引。
-    //    点亮本群系终点篝火后索引跳到"下一群系"的进度点, 插值立刻崩回 0,
-    //    结算页于是显示"点灯前一帧"的 81.4% 这种数字。
+    //   本补丁改用 ProgressProjection: 索引完全由玩家真实 Center.z 决定,
+    //   切段/点灯/传送都不会改变"我已经走到哪", 进度因此天然连续。
+    //   raw 只在几何计算不可用 (进度点缺失/坐标为 0) 时作为兜底,
+    //   绝不会与几何值取 max (旧实现开赛固定 +6% 就是取 max + cap 造成的)。
     //
-    // 修正策略 (只在本机是 PCSR 对局时生效, 不污染普通 RANKED 与单人速通):
-    //   · 记录历史最大值, 进度单调不减 (拒绝因索引跳变导致的回退)
-    //   · 只有"我方自己真正登顶完赛"才强制 1.0
-    //     (绝不能因为 race.Status == finished 或已经结算就置 1: 掉线作废、对手完赛、
-    //      超时收尾都会把 status 变成 finished, 那样会给对手和自己刷出一个假的 100%)
-    //   · 用当前 Z 坐标相对最近两个进度点的投影做连续估计, 抹平"点灯瞬间跳变"
+    //   另外两件事保持不变:
+    //     1) 单调不减: 任何偶发回退都不外泄 (对手实时帧同步也吃这个值)
+    //     2) 只有确认登顶才置 1.0: 修掉"结算显示登顶前一帧 81.4%"
     [HarmonyPatch(typeof(RaceProgress), "Current")]
     public static class ProgressMonotonicPatch
     {
@@ -29,13 +31,15 @@ namespace PeakCSR
         {
             try
             {
-                // 静态闸门 (护栏 2): 只在 PCSR 对局内生效
+                // 静态闸门: 只在 PCSR 对局内生效, 不污染普通 RANKED 与单人速通
                 if (!MatchCoordinator.IsCurrentPeakCsrMatch()) return;
                 if (__result < 0f) return;
 
-                bool finishedByMe = HasSelfClimbedToPeak();
-                float zRatio = ComputeZRatio();
-                __result = ProgressMonotonicState.Correct(__result, finishedByMe, zRatio);
+                bool finished = HasSelfClimbedToPeak();
+                float geometric = ComputeGeometricProgress();
+                float value = geometric >= 0f ? geometric : __result;
+
+                __result = ProgressMonotonicState.Correct(value, finished);
             }
             catch (Exception ex)
             {
@@ -43,10 +47,10 @@ namespace PeakCSR
             }
         }
 
-        // 唯一允许把进度强制成 100% 的条件: 服务端确认"我自己"已经完赛。
-        // 注意不能用 race.Status == finished / Session.State == Finished:
-        // 掉线作废、对手先登顶、AutoEndMs 超时收尾都会满足那两个条件, 而那些场景下
-        // 我一个进度点都没点, 却会被显示成 100%, 并随实时帧同步给对手。
+        // 唯一允许把进度强制成 1.0 的条件: 服务端确认"我自己"已经完赛。
+        // 不能用 race.Status == finished / Session.State == Finished:
+        // 掉线作废、对手先登顶、AutoEndMs 超时收尾都会满足那两个条件,
+        // 那些场景下我的进度点可能一个都没点, 却会被显示成 100%。
         private static bool HasSelfClimbedToPeak()
         {
             try
@@ -63,7 +67,8 @@ namespace PeakCSR
             }
         }
 
-        private static float ComputeZRatio()
+        // 按真实 Z 位置算连续进度; 任何前提不满足都返回 -1 让调用方回退到 raw
+        private static float ComputeGeometricProgress()
         {
             try
             {
@@ -75,28 +80,35 @@ namespace PeakCSR
                 ProgressPointEx[] pts = ProgressPointEx.From(handler.progressPoints);
                 if (pts.Length < 2) return -1f;
 
-                // 过滤掉 NADIR 这种终局点后的辅助点
-                int last = pts.Length - 1;
-                while (last > 0 && pts[last].IsNadir) last--;
-                if (last < 1) return -1f;
+                MatchCoordinator coordinator = MatchCoordinator.Instance;
+                MatchSession session = coordinator != null ? coordinator.CurrentSession : null;
+                int route = session != null ? session.Route : 0;
 
-                Vector3 pos = local.Center;
-
-                // 找到最后一个已越过的点 (按 Z)
-                int reached = -1;
-                for (int i = 0; i <= last; i++)
+                // 单群系: 只在本群系的进度点区间内归一, 否则分母取了整座山会严重偏小
+                // 全山: 从 0 到最后一个点, 与原版 last 语义一致
+                int spanStart = 0;
+                int spanEnd = -1;
+                if (route > 0 && session != null)
                 {
-                    if (pts[i].HasPosition && pos.z > pts[i].Z) reached = i;
+                    int biomeStart;
+                    int biomeCount;
+                    if (session.TryResolveRouteSpan(out biomeStart, out biomeCount))
+                    {
+                        spanStart = biomeStart;
+                        spanEnd = biomeStart + biomeCount;
+                    }
                 }
-                if (reached >= last) return 1f;
-                if (reached < 0) reached = 0;
-                if (!pts[reached].HasPosition || !pts[reached + 1].HasPosition) return -1f;
 
-                float zA = pts[reached].Z;
-                float zB = pts[reached + 1].Z;
-                float span = zB - zA;
-                float frac = span > 0.5f ? Mathf.Clamp01((pos.z - zA) / span) : 1f;
-                return Mathf.Clamp01((reached + frac) / Mathf.Max(1, last));
+                ProgressPointInfo[] info = new ProgressPointInfo[pts.Length];
+                for (int i = 0; i < pts.Length; i++)
+                {
+                    info[i].HasPosition = pts[i].HasPosition;
+                    info[i].Z = pts[i].Z;
+                    info[i].IsNadir = pts[i].IsNadir;
+                    info[i].Biome = pts[i].BiomeOrdinal;
+                }
+
+                return ProgressProjection.Compute(info, local.Center.z, spanStart, spanEnd);
             }
             catch
             {
@@ -111,32 +123,73 @@ namespace PeakCSR
         public bool HasPosition;
         public float Z;
         public bool IsNadir;
+        // 群系在本次山体里的出现序号 (0 起, 相邻同名群系视为同一群系)
+        public int BiomeOrdinal;
 
         public static ProgressPointEx[] From(Array points)
         {
             if (points == null) return new ProgressPointEx[0];
             int len = points.Length;
             ProgressPointEx[] arr = new ProgressPointEx[len];
+
+            // 用群系枚举值的"出现顺序"编号: RANKED 已按地图实际群系顺序重排 progressPoints,
+            // 所以相同 biome 必然连续出现, 序号可以直接按变化累加。
+            int ordinal = -1;
+            object lastBiome = null;
             for (int i = 0; i < len; i++)
             {
                 object p = points.GetValue(i);
                 ProgressPointEx item = new ProgressPointEx();
                 if (p != null)
                 {
-                    var pt = p as MountainProgressHandler.ProgressPoint;
+                    MountainProgressHandler.ProgressPoint pt = p as MountainProgressHandler.ProgressPoint;
                     if (pt != null)
                     {
                         item.IsNadir = string.Equals(pt.title, "NADIR", StringComparison.OrdinalIgnoreCase);
+                        if (!Equals(pt.biome, lastBiome))
+                        {
+                            ordinal++;
+                            lastBiome = pt.biome;
+                        }
+                        item.BiomeOrdinal = ordinal < 0 ? 0 : ordinal;
                         if (pt.transform != null)
                         {
                             item.HasPosition = true;
                             item.Z = pt.transform.position.z;
                         }
                     }
+                    else
+                    {
+                        item.BiomeOrdinal = ordinal < 0 ? 0 : ordinal;
+                    }
+                }
+                else
+                {
+                    item.BiomeOrdinal = ordinal < 0 ? 0 : ordinal;
                 }
                 arr[i] = item;
             }
             return arr;
+        }
+    }
+
+    // RANKED 在开赛瞬间 (ReleaseWhenStartReached) 会调用 RaceProgress.Reset(),
+    // 而我们的单调缓存在 StartNewSession 时才重置, 两者临界点不一致。
+    // 这里把两个重置对齐, 避免"开赛前采样"被当成"开赛后基准"。
+    [HarmonyPatch(typeof(RaceProgress), "Reset")]
+    public static class ProgressResetSyncPatch
+    {
+        public static void Prefix()
+        {
+            try
+            {
+                if (!MatchCoordinator.IsCurrentPeakCsrMatch()) return;
+                ProgressMonotonicState.Reset();
+            }
+            catch (Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 进度基准同步异常: " + ex.Message);
+            }
         }
     }
 }
