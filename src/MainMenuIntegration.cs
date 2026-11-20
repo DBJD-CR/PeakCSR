@@ -10,14 +10,11 @@ using UnityEngine.UI;
 namespace PeakCSR
 {
     // 在主菜单右侧 RANKED 路牌柱原生追加一块 PCSR 1v1 木牌
-    // 注意: 必须挂 MainMenuMainPage.Start 的 Postfix 并用实例参数 __instance,
-    // 直接 patch RANKED 的 SignpostPatch.Postfix 时 __instance 恒为 null 会静默失败
     [HarmonyPatch(typeof(MainMenuMainPage), "Start")]
     public static class MainMenuIntegration
     {
         internal const string SignName = "RankedSign_PeakCSR1v1";
 
-        // 与 RANKED 的 SignpostPatch 保持完全一致的木牌布局常量
         internal const float SignEdgeX = -110f;
         internal const float SignTailOffset = 100f;
         internal const float SignHeight = 52f;
@@ -26,7 +23,6 @@ namespace PeakCSR
         internal const float SignTailPadding = 22f;
         internal const float MinSignWidth = 190f;
         internal const float MaxSignWidth = 440f;
-        // RANKED 木牌自上而下，放在 Header 之上
         internal const float SignY = 262f;
 
         private static Button _signButton;
@@ -47,8 +43,6 @@ namespace PeakCSR
             }
         }
 
-        // RANKED 会先在自己的 Postfix 里建好 RankedSignpostContainer,
-        // 这里逐帧重试等待, 确保永远追加在 RANKED 木牌之后
         internal static bool TryAttachSign()
         {
             Transform mast = FindMast();
@@ -80,7 +74,6 @@ namespace PeakCSR
             GameObject clone = UnityEngine.Object.Instantiate(template.gameObject, buttonsParent);
             clone.name = SignName;
             clone.SetActive(true);
-            // 置顶绘制: 万一同位置有其它木牌, 让 PCSR 显示在最上层
             clone.transform.SetAsLastSibling();
 
             RectTransform rt = clone.GetComponent<RectTransform>();
@@ -91,7 +84,6 @@ namespace PeakCSR
                 rt.pivot = new Vector2(0.5f, 0.5f);
                 rt.localScale = Vector3.one;
                 rt.sizeDelta = new Vector2(MaxSignWidth, SignHeight);
-                // 顶部木牌不需要额外的尾部错位, 与表头同宽居中
                 rt.anchoredPosition = new Vector2(SignEdgeX + MaxSignWidth / 2f, SignY);
             }
 
@@ -127,7 +119,6 @@ namespace PeakCSR
             GameObject go = GameObject.Find("RankedSignpostContainer");
             if (go != null) return go.transform;
 
-            // 兜底: 主菜单可能挂在非激活层, 用全场景扫描一次
             MainMenuMainPage page = UnityEngine.Object.FindAnyObjectByType<MainMenuMainPage>();
             if (page == null) return null;
             Transform direct = page.transform.Find("RankedSignpostContainer");
@@ -142,7 +133,6 @@ namespace PeakCSR
 
         private static void OnCsrSignClicked()
         {
-            // 与 RANKED 原生木牌一致: 打开 PCSR 排位中心窗口 (其中可一键开始匹配)
             PcsrMenuWindow.ShowWindow();
         }
 
@@ -159,12 +149,11 @@ namespace PeakCSR
             string label;
             if (mc != null && mc.State != CsMatchState.Idle && mc.State != CsMatchState.Finished)
             {
-                label = CsrLoc.T("sign.queuing");
+                label = CsrLoc.T("sign.queuing", MatchController.FormatElapsed(mc.QueueElapsedSeconds));
             }
             else
             {
-                // 复用 RANKED 的浅底段位配色, 保证与相邻木牌观感一致
-                string tierHex = ColorUtility.ToHtmlStringRGB(RankedMenuIcons.GetTierColorOnLight(tierKey));
+                string tierHex = EloCalculator.GetTierHexColorOnLight(elo);
                 label = CsrLoc.T("sign.idle", tierHex, elo.ToString("N0"));
             }
 
@@ -184,7 +173,6 @@ namespace PeakCSR
             }
         }
 
-        // 复刻 RANKED 的 FitSignToLabel: 字号与宽度联动, 保持与其它木牌同一基线
         private static void FitSignWidth(Button btn, TextMeshProUGUI text)
         {
             RectTransform rt = btn.transform as RectTransform;
@@ -207,7 +195,6 @@ namespace PeakCSR
             rt.anchoredPosition = new Vector2(SignEdgeX + width / 2f, SignY);
         }
 
-        // 挂在 MainMenuMainPage 上, 负责等待 RANKED 木牌柱建好后注入并守护它不被隐藏
         internal sealed class CsrSignInjector : MonoBehaviour
         {
             private const float WaitSeconds = 8f;
@@ -265,7 +252,6 @@ namespace PeakCSR
 
             private void LateUpdate()
             {
-                // RANKED 会隐藏柱子里未登记的按钮, 注入后短时间内兜底恢复
                 if (_signButton == null) return;
                 if (Time.realtimeSinceStartup > _guardUntil) return;
                 if (!_signButton.gameObject.activeSelf)
