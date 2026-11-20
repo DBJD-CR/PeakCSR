@@ -31,32 +31,37 @@ export async function handleAdmin(request, body, env) {
     if (!row) return jsonResp({ ok: false, error: "Match not found" }, 404);
     if (row.is_void) return jsonResp({ ok: true, status: "already_void" }, 200);
 
-    // 原子抢占: 只有把 is_void 从 0 改成 1 的那一次才允许动分数
-    const claim = await env.DB.prepare(
-      "UPDATE settled_matches SET is_void = 1 WHERE match_key = ? AND is_void = 0"
-    ).bind(key).run();
-    if (!claim || !claim.meta || claim.meta.changes === 0) {
-      return jsonResp({ ok: true, status: "already_void" }, 200);
-    }
-
     const winMode = modeRollbackColumns(row.format, "wins");
     const loseMode = modeRollbackColumns(row.format, "losses");
     const winGain = Number(row.winner_delta) || 0;
     const loseGain = Number(row.loser_delta) || 0;
 
-    // 回滚量用"历史里实际记下的变化"; peak_elo 是历史最高分, 回滚不回收
-    await env.DB.batch([
+    // 回滚 + 打作废标记同批次
+    // 顺序: 先把两条有守卫的回滚做掉, 最后才写标记
+    // 守卫条件引用 is_void = 0, 所以重复请求时回滚整段变成 no-op, 天然幂等
+    const guardSql = "EXISTS (SELECT 1 FROM settled_matches WHERE match_key = ? AND is_void = 0)";
+    const results = await env.DB.batch([
       env.DB.prepare(
         `UPDATE players SET elo = MAX(${rulesFloor()}, elo - ?),
           wins = MAX(0, wins - 1), streak = CASE WHEN streak > 0 THEN streak - 1 ELSE 0 END,
-          ${winMode}, updated_at = ? WHERE steam_id = ?`
-      ).bind(winGain, now, row.winner_steam_id),
+          ${winMode}, updated_at = ? WHERE steam_id = ? AND ${guardSql}`
+      ).bind(winGain, now, row.winner_steam_id, key),
       env.DB.prepare(
         `UPDATE players SET elo = MAX(${rulesFloor()}, elo - ?),
           losses = MAX(0, losses - 1), streak = CASE WHEN streak < 0 THEN streak + 1 ELSE 0 END,
-          ${loseMode}, updated_at = ? WHERE steam_id = ?`
-      ).bind(loseGain, now, row.loser_steam_id)
+          ${loseMode}, updated_at = ? WHERE steam_id = ? AND ${guardSql}`
+      ).bind(loseGain, now, row.loser_steam_id, key),
+      env.DB.prepare(
+        "UPDATE settled_matches SET is_void = 1 WHERE match_key = ? AND is_void = 0"
+      ).bind(key)
     ]);
+
+    // 最后一条的 changes 就是"本次是否真的抢到了作废权"
+    const marker = results && results[2];
+    const claimed = !!(marker && marker.meta && marker.meta.changes > 0);
+    if (!claimed) {
+      return jsonResp({ ok: true, status: "already_void" }, 200);
+    }
 
     // 历史里保留原始增减 (审计可追溯), 作废通过 is_void 判定, 不再清零 delta
 

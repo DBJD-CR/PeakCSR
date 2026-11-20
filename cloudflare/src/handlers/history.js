@@ -19,12 +19,14 @@ export async function handleHistory(url, env) {
 
   const history = (results || []).map(function (r) {
     const isWinner = r.winner_steam_id === steamId;
+    const isVoid = !!r.is_void;
     return {
       matchKey: r.match_key,
       inviteCode: r.invite_code,
       seed: r.seed,
-      won: isWinner,
-      isVoid: !!r.is_void,
+      // 作废局显式 won=false
+      won: isVoid ? false : isWinner,
+      isVoid: isVoid,
       opponentSteamId: isWinner ? r.loser_steam_id : r.winner_steam_id,
       delta: isWinner ? r.winner_delta : r.loser_delta,
       eloBefore: isWinner ? r.win_elo_before : r.lose_elo_before,
