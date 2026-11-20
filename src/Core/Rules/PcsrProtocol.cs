@@ -146,6 +146,11 @@ namespace PeakCSR
                 packet.HasElo = true;
                 packet.OpponentElo = elo;
             }
+            // 字段 3 是插件版本 (EncodeSyn / EncodeAck 会写), 解码时也要还原, 否则收包侧永远拿不到
+            if (!string.IsNullOrEmpty(parts[3]))
+            {
+                packet.PluginVersion = parts[3];
+            }
             if (parts.Length >= 6)
             {
                 packet.HasRatedFlag = true;
