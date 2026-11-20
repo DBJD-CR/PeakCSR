@@ -41,9 +41,17 @@ namespace PeakCSR
                 return;
             }
 
+            // 对手 dnf 分支的前提: 本局必须真的通过实时通道拿到过对手心跳证据。
+            // socket 从未连上时 IsOpponentHeartbeatFresh 会返回 true (无法判断不做反向误判),
+            // 那个 true 不能当成"对手活着"的证据, 否则一开局就能凭服务端 dnf 白拿一胜
+            bool heartbeatEvidenceAvailable = session.LiveEverConnected;
+
             // 死亡判负: 必须是我方自己死亡 (不是 revived/replaced), 且本局确实禁止复活
             if (self.State == "dnf" && !race.ReviveDead)
             {
+                // deaths 为 0 的 dnf 是超时/放弃而非阵亡, 播报要区分开
+                bool died = self.Deaths > 0;
+                session.AnnounceSelfDnf(!died);
                 ConcludeMatch(session, false, CsrLoc.T("status.loss.dnf"));
                 return;
             }
@@ -52,13 +60,23 @@ namespace PeakCSR
             // 否则就是对手掉线 (服务端把掉线者也标成 dnf), 这种情况要作废而不是判我方胜。
             if (opp != null && opp.State == "dnf" && !race.ReviveDead)
             {
+                // 没有心跳通道可依 (从未连上) 时不能判胜: 交给观察窗, 恢复不了就作废
+                if (!heartbeatEvidenceAvailable)
+                {
+                    PcsrLog.LogWarning("[PeakCSR] 对手 DNF 但本局从未建立实时通道，无法确认是阵亡还是掉线，暂不判胜。");
+                    _owner.Guardian.BeginDisconnectObservation(session, "opponent dnf without live evidence");
+                    return;
+                }
+
                 if (_gw.IsOpponentHeartbeatFresh(session.OpponentSteamId))
                 {
+                    session.AnnounceOpponentDnf();
                     ConcludeMatch(session, true, CsrLoc.T("status.win.opp_dnf", session.OpponentName));
                 }
                 else
                 {
                     PcsrLog.LogWarning("[PeakCSR] 对手 dnf 但心跳已停止，判定为对手掉线，本局作废。");
+                    session.AnnounceOpponentDisconnect();
                     ConcludeVoid(session, CsrLoc.T("status.void_opp_dc", session.OpponentName));
                 }
                 return;
@@ -69,6 +87,7 @@ namespace PeakCSR
             {
                 session.OpponentDepartedObserved = true;
                 PcsrLog.LogWarning("[PeakCSR] 对手已从房间消失，本局作废（不判胜负、不计分）。");
+                session.AnnounceOpponentDisconnect();
                 ConcludeVoid(session, CsrLoc.T("status.void_opp_dc", session.OpponentName));
             }
         }
@@ -126,6 +145,21 @@ namespace PeakCSR
             session.MyRerollVoteActive = false;
             session.OppRerollVoteActive = false;
 
+            // 战报进度快照补正:
+            // ReportedProgress 是逐帧单调记录的真值 (确认登顶后为 1.0), 用它补正。
+            // PeakReported 只保存"观测到的峰值", 不包含完赛强制值, 不能直接拿来当战报进度。
+            if (!isVoid)
+            {
+                float peak = ProgressMonotonicState.ReportedProgress;
+                if (peak > session.MyBestProgress) session.MyBestProgress = peak;
+                // 我自己登顶完赛: 无论快照停在哪一帧, 战报都应该显示 100%
+                if (iWon) session.MyBestProgress = 1f;
+            }
+            if (session.MyBestProgress < 0f) session.MyBestProgress = 0f;
+            if (session.MyBestProgress > 1f) session.MyBestProgress = 1f;
+            if (session.OppBestProgress < 0f) session.OppBestProgress = 0f;
+            if (session.OppBestProgress > 1f) session.OppBestProgress = 1f;
+
             PlayerProfileBridge profile = _owner.Profile;
             bool wasPlacement = profile.Record.TotalGames < EloEngine.PlacementMatchesCount;
 
@@ -141,6 +175,13 @@ namespace PeakCSR
                     session.MyBestProgress,
                     session.OppBestProgress);
 
+            // 自方登顶播报 (带上真实完赛用时; 掉线作废不作登顶播报)
+            if (!isVoid && iWon)
+            {
+                long peakMs = _gw.TimerElapsedMs;
+                if (peakMs > 0) session.AnnounceSelfPeak(peakMs);
+            }
+
             string sign = detail.TotalDelta >= 0 ? "+" : "";
             session.StatusMessage = reason + (isVoid ? " | 本局作废，不计分" : (" | ELO: " + detail.NewElo + " (" + sign + detail.TotalDelta + ")"));
             if (!string.IsNullOrEmpty(detail.AntiBoostNote) && !isVoid)
@@ -155,7 +196,12 @@ namespace PeakCSR
             // 作废局也给标记, 否则玩家会以为对局凭空消失
             PostMatchReportView.MarkPostMatchPending();
 
-            if (!isVoid && session.IsRatedMatch && _owner.Ladder != null
+            // 换房期间禁止上报
+            if (session.SwitchingRerollRoom && !isVoid)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 换图切换期间不提交战报 (房间号与地图数据不属于同一场)。");
+            }
+            else if (!isVoid && session.IsRatedMatch && _owner.Ladder != null
                 && !string.IsNullOrEmpty(session.InviteCode) && !string.IsNullOrEmpty(session.OpponentSteamId))
             {
                 string mySteamId = _gw.MySteamId;
@@ -245,12 +291,28 @@ namespace PeakCSR
         {
             try
             {
-                if (_gw.ServiceAvailable == false) return;
+                // 服务不可用/拿不到房间时直接退出, 但不清 RetireLobbyAt:
+                // 由 ConnectivityGuardian.TickRetireLobby 的可用性检查前移来保证下次再试
+                if (_gw.ServiceAvailable == false)
+                {
+                    PcsrLog.LogWarning("[PeakCSR] 作废局收尾暂不可用 (服务未就绪)，稍后重试。");
+                    session.RetireLobbyAt = Time.realtimeSinceStartup + MatchSession.VoidRetryIntervalSeconds;
+                    return;
+                }
                 RankedPeak.Services.RaceInfo race = _gw.CurrentRace;
-                if (race == null) return;
+                if (race == null)
+                {
+                    PcsrLog.LogWarning("[PeakCSR] 作废局收尾时拿不到房间快照，稍后重试。");
+                    session.RetireLobbyAt = Time.realtimeSinceStartup + MatchSession.VoidRetryIntervalSeconds;
+                    return;
+                }
 
                 // 已经结束的房间 RANKED 自己会收走, 不必重复操作
-                if (race.Status == "finished") return;
+                if (race.Status == "finished")
+                {
+                    session.RetireLobbyAt = -1f;
+                    return;
+                }
 
                 // 第一步: 房主把公开房改成私密。
                 // 即便退出后房间暂时只剩 1 人, 也不会出现在大厅列表里被第三方捡走。

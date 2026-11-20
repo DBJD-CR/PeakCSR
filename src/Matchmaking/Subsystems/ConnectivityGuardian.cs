@@ -26,13 +26,15 @@ namespace PeakCSR
             if (session == null) return;
             if (session.RetireLobbyAt < 0f) return;
             if (Time.realtimeSinceStartup < session.RetireLobbyAt) return;
-            session.RetireLobbyAt = -1f;
 
             try
             {
+                // 可用性检查放在清除 deadline 之前
                 if (_gw.ServiceAvailable == false) return;
                 RankedPeak.Services.RaceInfo race = _gw.CurrentRace;
                 if (race == null) return;
+
+                session.RetireLobbyAt = -1f;
                 if (race.Status == "finished") return;
                 _gw.LeaveRace();
                 PcsrLog.LogInfo("[PeakCSR] 作废局已退出房间，等待服务端回收。");
@@ -40,6 +42,7 @@ namespace PeakCSR
             catch (System.Exception ex)
             {
                 PcsrLog.LogWarning("[PeakCSR] 作废局退出房间失败（多半已断网，可忽略）: " + ex.Message);
+                session.RetireLobbyAt = Time.realtimeSinceStartup + MatchSession.VoidRetryIntervalSeconds;
             }
         }
 
