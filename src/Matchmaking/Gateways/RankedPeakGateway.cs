@@ -257,11 +257,22 @@ namespace PeakCSR
             RaceService.Instance.Forfeit();
         }
 
-        public void SendChat(string text)
+        // 返回 true 仅当包真的交给实时连接; socket 未就绪/发送异常一律 false
+        public bool SendChat(string text)
         {
-            RaceLiveConnection conn = RaceLiveConnection.Instance;
-            if (conn == null || !conn.IsConnected) return;
-            conn.SendChat(text);
+            if (string.IsNullOrEmpty(text)) return false;
+            try
+            {
+                RaceLiveConnection conn = RaceLiveConnection.Instance;
+                if (conn == null || !conn.IsConnected) return false;
+                conn.SendChat(text);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 发送实时聊天失败: " + ex.Message);
+                return false;
+            }
         }
 
         // 左下角聊天框注入高亮系统提示 (经反射调用 LiveChatOverlay.OnEntry)

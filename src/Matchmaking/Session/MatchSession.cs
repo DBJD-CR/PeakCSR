@@ -484,7 +484,12 @@ namespace PeakCSR
         // 我方登顶: 记录用时并广播 PEAK 包给对手
         public void AnnounceSelfPeak(long elapsedMs)
         {
-            if (elapsedMs <= 0) elapsedMs = 0;
+            // 非正用时不是真实登顶时间, 直接拒绝记录与广播 (与对手侧同一规则)
+            if (elapsedMs <= 0)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 忽略非正的我方完赛用时 (" + elapsedMs + "ms)，不广播 PEAK。");
+                return;
+            }
             if (SelfPeakMs <= 0) SelfPeakMs = elapsedMs;
             if (!SelfPeakAnnounced)
             {
@@ -493,17 +498,14 @@ namespace PeakCSR
                 _gw.PushSystemChat(CsrLoc.T("chat.match.self_peak", clock));
             }
             // 广播登顶宣告 (重发是安全的, 对手侧只认第一条)
+            // 只有网关确认包已交给实时连接才算"已广播": socket 未就绪时必须保持 false,
+            // 否则 Tick 不再重发, 仲裁可能在对端没收到 PEAK 的情况下判我方胜
             if (!SelfPeakBroadcasted)
             {
-                try
+                if (_gw.SendChat(PcsrProtocol.EncodePeak(SelfPeakMs)))
                 {
-                    _gw.SendChat(PcsrProtocol.EncodePeak(SelfPeakMs));
                     SelfPeakBroadcasted = true;
                     SelfPeakBroadcastAt = Now();
-                }
-                catch
-                {
-                    // socket 未就绪: 下一帧 Tick 会重试
                 }
             }
             // 等对手期间房间会在 AutoEndMs 后关闭, 顺手把倒计时也广播掉
@@ -514,8 +516,12 @@ namespace PeakCSR
         public void NoteOpponentPeak(long elapsedMs)
         {
             if (OppPeakMs > 0) return;
-            if (elapsedMs < 0) elapsedMs = 0;
-            OppPeakMs = elapsedMs <= 0 ? 1L : elapsedMs;
+            if (elapsedMs <= 0)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 忽略对手的非正完赛用时 (" + elapsedMs + "ms)，继续等待有效 PEAK。");
+                return;
+            }
+            OppPeakMs = elapsedMs;
             OppPeakReceivedAt = Now();
             if (!OppPeakAnnounced)
             {
@@ -621,6 +627,49 @@ namespace PeakCSR
             _routeSpanSeed = Seed;
             _routeSpanLevel = LevelIndex;
             PcsrLog.LogInfo("[PeakCSR] 本局赛段区间: Route=" + Route + ", 进度点 " + start + ".." + end);
+            LogRouteSpanDiagnostics(gw, start, end);
+        }
+
+        // 分段域自检: 把"进度点数 / 标题序列 / 段序号 / 段数"一次性打全
+        // 用途: 确认段序号是否等于进度点索引
+        // 只读诊断, 不参与任何判定
+        private void LogRouteSpanDiagnostics(IRankedPeakGateway gw, int spanStart, int spanEnd)
+        {
+            try
+            {
+                ProgressPointInfo[] pts = gw.GetProgressPoints();
+                if (pts == null || pts.Length == 0)
+                {
+                    PcsrLog.LogWarning("[PeakCSR] 分段自检: 进度点为空 (地图可能尚未加载)");
+                    return;
+                }
+
+                System.Text.StringBuilder titles = new System.Text.StringBuilder();
+                for (int i = 0; i < pts.Length; i++)
+                {
+                    if (i > 0) titles.Append(',');
+                    titles.Append(i).Append('=').Append(BiomeSegmenter.NormalizeTitle(pts[i].Title));
+                }
+
+                string segNum = "?";
+                try { segNum = ((int)MapHandler.CurrentSegmentNumber).ToString(); }
+                catch { }
+
+                int segCount = -1;
+                try { segCount = BuildRouteSegments().Count; }
+                catch { }
+
+                PcsrLog.LogInfo("[PeakCSR] 分段自检: 点数=" + pts.Length
+                    + " 段号=" + segNum
+                    + " 段数=" + segCount
+                    + " Route=" + Route
+                    + " span=[" + spanStart + ".." + spanEnd + "]"
+                    + " 标题=[" + titles + "]");
+            }
+            catch (Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 分段自检失败: " + ex.Message);
+            }
         }
 
         // 新地图的进度点表已加载: 之前缓存的区间属于上一张图, 作废

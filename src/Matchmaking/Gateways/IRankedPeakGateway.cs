@@ -44,7 +44,8 @@ namespace PeakCSR
         void SetPublic(bool isPublic, Action<string> onError);
         void RemoveParticipant(string steamId, string name, Action<string> onError);
         void Forfeit();
-        void SendChat(string text);
+        // 返回 true 表示本次确实交给了实时连接 (socket 已连接且未抛异常)
+        bool SendChat(string text);
 
         // 左下角聊天框注入高亮系统提示 (原业务层反向调用补丁类的行为迁移至此)
         void PushSystemChat(string richTextBody);
