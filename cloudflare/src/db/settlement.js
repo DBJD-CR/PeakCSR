@@ -63,10 +63,26 @@ export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerN
   const newLosePeak = Math.max(losePlayer.peak_elo, newLoseElo);
   const newLoseStreak = losePlayer.streak <= 0 ? losePlayer.streak - 1 : -1;
 
+  // 落库要用"实际发生的变化"
+  const winAppliedDelta = newWinElo - winPlayer.elo;
+  const loseAppliedDelta = newLoseElo - losePlayer.elo;
+
   const winModeCols = modeColumns(format, "wins");
   const loseModeCols = modeColumns(format, "losses");
 
+  // 历史行放在批次最前且不使用 OR IGNORE
   await db.batch([
+    db.prepare(
+      `INSERT INTO settled_matches
+       (match_key, invite_code, seed, winner_steam_id, loser_steam_id, winner_delta, loser_delta,
+        win_elo_before, win_elo_after, lose_elo_before, lose_elo_after,
+        level_index, ascent, format, route, duration_ms, winner_progress, loser_progress,
+        verify_method, is_void, settled_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+    ).bind(key, inviteCode, seed, winnerId, loserId, winAppliedDelta, loseAppliedDelta,
+      winPlayer.elo, newWinElo, losePlayer.elo, newLoseElo,
+      levelIndex, ascent, format, route, durationMs, winnerProgress, loserProgress,
+      verifyMethod, now),
     db.prepare(
       `UPDATE players SET player_name = ?, elo = ?, peak_elo = ?, wins = wins + 1, streak = ?,
         ${winModeCols}, updated_at = ? WHERE steam_id = ?`
@@ -74,21 +90,13 @@ export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerN
     db.prepare(
       `UPDATE players SET player_name = ?, elo = ?, peak_elo = ?, losses = losses + 1, streak = ?,
         ${loseModeCols}, updated_at = ? WHERE steam_id = ?`
-    ).bind(loserName, newLoseElo, newLosePeak, newLoseStreak, now, loserId),
-    db.prepare(
-      `INSERT OR IGNORE INTO settled_matches
-       (match_key, invite_code, seed, winner_steam_id, loser_steam_id, winner_delta, loser_delta,
-        win_elo_before, win_elo_after, lose_elo_before, lose_elo_after,
-        level_index, ascent, format, route, duration_ms, winner_progress, loser_progress,
-        verify_method, is_void, settled_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
-    ).bind(key, inviteCode, seed, winnerId, loserId, winDelta, loseDelta,
-      winPlayer.elo, newWinElo, losePlayer.elo, newLoseElo,
-      levelIndex, ascent, format, route, durationMs, winnerProgress, loserProgress,
-      verifyMethod, now)
+    ).bind(loserName, newLoseElo, newLosePeak, newLoseStreak, now, loserId)
   ]);
 
-  return { winnerElo: newWinElo, loserElo: newLoseElo, winnerDelta: winDelta, loserDelta: loseDelta };
+  return {
+    winnerElo: newWinElo, loserElo: newLoseElo,
+    winnerDelta: winAppliedDelta, loserDelta: loseAppliedDelta
+  };
 }
 
 export async function recordVoidSettlement(db, key, inviteCode, seed, reporterId, opponentId, levelIndex, ascent, format, route,
@@ -99,6 +107,7 @@ export async function recordVoidSettlement(db, key, inviteCode, seed, reporterId
     const p = await db.prepare("SELECT elo FROM players WHERE steam_id = ?").bind(id).first();
     before.push(p && p.elo ? p.elo : 0);
   }
+  // 这里保持 OR IGNORE: 作废是"只记一笔、不加分"的语义, 重复申报不需要报错
   await db.prepare(
     `INSERT OR IGNORE INTO settled_matches
      (match_key, invite_code, seed, winner_steam_id, loser_steam_id, winner_delta, loser_delta,
