@@ -1,7 +1,6 @@
 using System;
 using HarmonyLib;
 using RankedPeak.Services;
-using RankedPeak.Timer;
 using UnityEngine;
 
 namespace PeakCSR
@@ -24,54 +23,28 @@ namespace PeakCSR
     //      超时收尾都会把 status 变成 finished, 那样会给对手和自己刷出一个假的 100%)
     //   · 用当前 Z 坐标相对最近两个进度点的投影做连续估计, 抹平"点灯瞬间跳变"
     [HarmonyPatch(typeof(RaceProgress), "Current")]
-    public static class ProgressFixPatch
+    public static class ProgressMonotonicPatch
     {
-        private static float _lastReported;
-        private static bool _hasLast;
-        // 平滑后的段内插值缓存, 用于在点灯瞬间延续原本的连续性
-        private static float _zSmoothed;
-        private static bool _hasZSmoothed;
-
-        public static void Reset()
-        {
-            _lastReported = 0f;
-            _hasLast = false;
-            _zSmoothed = 0f;
-            _hasZSmoothed = false;
-        }
-
-        // 只读给战报/UI 用: 本局真实到达过的最高进度, 不含任何终局强制的 1.0
-        public static float PeakReported { get { return _lastReported; } }
-
         public static void Postfix(ref float __result)
         {
             try
             {
-                if (!MatchController.IsCurrentPeakCsrMatch()) return;
+                // 静态闸门 (护栏 2): 只在 PCSR 对局内生效
+                if (!MatchCoordinator.IsCurrentPeakCsrMatch()) return;
                 if (__result < 0f) return;
 
                 bool finishedByMe = HasSelfClimbedToPeak();
-
-                float corrected = ComputeContinuous(__result);
-                corrected = ApplyMonotonic(corrected, finishedByMe);
-
-                if (finishedByMe)
-                {
-                    corrected = 1f;
-                    _lastReported = 1f;
-                    _hasLast = true;
-                }
-
-                __result = Mathf.Clamp01(corrected);
+                float zRatio = ComputeZRatio();
+                __result = ProgressMonotonicState.Correct(__result, finishedByMe, zRatio);
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[PeakCSR] 进度修正补丁异常: " + ex.Message);
+                PcsrLog.LogWarning("[PeakCSR] 进度修正补丁异常: " + ex.Message);
             }
         }
 
         // 唯一允许把进度强制成 100% 的条件: 服务端确认"我自己"已经完赛。
-        // 注意不能用 race.Status == finished / MatchController.State == Finished:
+        // 注意不能用 race.Status == finished / Session.State == Finished:
         // 掉线作废、对手先登顶、AutoEndMs 超时收尾都会满足那两个条件, 而那些场景下
         // 我一个进度点都没点, 却会被显示成 100%, 并随实时帧同步给对手。
         private static bool HasSelfClimbedToPeak()
@@ -87,36 +60,6 @@ namespace PeakCSR
             catch
             {
                 return false;
-            }
-        }
-
-        // 用 Z 坐标相对进度点连线的投影做连续估计, 消除"点灯瞬间段索引跳变"
-        private static float ComputeContinuous(float raw)
-        {
-            try
-            {
-                float zRatio = ComputeZRatio();
-                if (zRatio < 0f) return raw;
-
-                // 平滑跟踪 Z 比例, 避免物理抖动
-                if (!_hasZSmoothed)
-                {
-                    _zSmoothed = zRatio;
-                    _hasZSmoothed = true;
-                }
-                else
-                {
-                    _zSmoothed = Mathf.Lerp(_zSmoothed, zRatio, 0.25f);
-                }
-
-                // 取两者较大值: 原逻辑更激进时保留原值, Z 投影更连续时用 Z 投影
-                float combined = Mathf.Max(raw, _zSmoothed);
-                // 但 Z 投影只用于补齐点灯瞬间的凹陷, 不应超过合理的上界
-                return Mathf.Clamp01(Mathf.Min(combined, raw + 0.06f));
-            }
-            catch
-            {
-                return raw;
             }
         }
 
@@ -158,52 +101,6 @@ namespace PeakCSR
             catch
             {
                 return -1f;
-            }
-        }
-
-        // 单调不减: 拒绝因索引跳变造成的回退, 但允许极小幅回落吸收噪声
-        // 另外提供"缓存被污染"的自愈: 未完赛却缓存着 1.0, 而真实值远低于它时,
-        // 说明这一帧读到的是终局伪值 (旧逻辑或官方逻辑写入的), 必须丢弃缓存重来。
-        private static float ApplyMonotonic(float value, bool finishedByMe)
-        {
-            if (!_hasLast)
-            {
-                _lastReported = value;
-                _hasLast = true;
-                return value;
-            }
-
-            if (!finishedByMe && _lastReported >= 0.999f && value < 0.95f)
-            {
-                Plugin.Log.LogWarning("[PeakCSR] 检测到进度缓存被终局伪值污染 (1.0 -> " + value.ToString("F3") + ")，已重置单调基准。");
-                _lastReported = value;
-                return value;
-            }
-
-            const float Tolerance = 0.002f;
-            float best = Mathf.Max(_lastReported, value - Tolerance);
-            _lastReported = best;
-            return best;
-        }
-    }
-
-    // 直接监听本机点灯事件, 作为最可靠的分段来源
-    [HarmonyPatch(typeof(MountainProgressHandler), "SetSegmentComplete")]
-    public static class SplitCapturePatch
-    {
-        public static void Postfix(int segment)
-        {
-            try
-            {
-                if (!MatchController.IsCurrentPeakCsrMatch()) return;
-                long ms = 0;
-                if (RaceTimer.Instance != null) ms = RaceTimer.Instance.CurrentElapsedMs;
-                if (ms <= 0) return;
-                PcsrSplitTrack.ObserveLocalSegment(segment, ms);
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning("[PeakCSR] 分段打卡采集异常: " + ex.Message);
             }
         }
     }
