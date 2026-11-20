@@ -82,9 +82,17 @@ namespace PeakCSR
                 return true;
             }
 
-            // 情况 3: 对手已宣告登顶, 我方未登顶 -> 我方后到, 立刻判负
+            // 情况 3: 对手已宣告登顶, 我方未登顶 -> 可能是我方后到
+            // 先等一个对称窗口: 双方用时差在 PeakTieThresholdMs 内应作废而不是判负
             if (!session.SelfPeaked && session.OppPeakMs > 0)
             {
+                if (session.OppPeakReceivedAt < 0f) return false;
+                if (now - session.OppPeakReceivedAt < PeakAckWindowSeconds)
+                {
+                    // 窗口内继续观察, 等本地完赛检测把 PEAK 补上
+                    return false;
+                }
+
                 session.OutcomeDecided = true;
                 ConcludeMatch(session, false, CsrLoc.T("status.loss.peak",
                     session.OpponentName, CsrFormat.FormatClock(session.OppPeakMs / 1000.0)));
@@ -279,7 +287,15 @@ namespace PeakCSR
             BuildPostMatchData(session, iWon, reason, detail, wasPlacement, isVoid);
 
             // 战报立即弹出: 一方登顶即给双方看结果, 不再等结算界面关闭事件
-            PostMatchReportView.ShowPostMatchWindow();
+            // 展示层异常不中断后面的签名上报与作废退房
+            try
+            {
+                PostMatchReportView.ShowPostMatchWindow();
+            }
+            catch (System.Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 战报窗口展示失败 (不影响结算): " + ex.Message);
+            }
 
             // 换房期间禁止上报
             if (session.SwitchingRerollRoom && !isVoid)
