@@ -35,6 +35,8 @@ namespace PeakCSR
         public const float OpponentHeartbeatStaleSeconds = 6f;
         // 作废后留给 VOID 协议送达的时间, 之后才真正退出房间
         public const float VoidBroadcastGraceSeconds = 3f;
+        // 作废局房间收尾失败后的重试间隔
+        public const float VoidRetryIntervalSeconds = 3f;
         // 赛中 30s 投票换图超时
         public const float RerollVoteTimeoutSeconds = 30f;
 
@@ -81,6 +83,8 @@ namespace PeakCSR
 
         // ===== 轮询/收敛 =====
         public bool LobbyFetchInFlight;
+        // join/create 未回调前不允许再发起房间操作
+        public bool RoomOpInFlight;
         public float NextLobbyPollTime;
         public bool ConvergeFetchInFlight;
         public float NextConvergePollTime;
@@ -95,6 +99,14 @@ namespace PeakCSR
         public bool VoidSubmitted;
         public bool DisconnectConfirmed;
         public bool ObservingDisconnect;
+        // 一次性广播标记: 同一条提示每局只推一次, 避免轮询重复刷屏
+        public bool StartAnnounced;
+        public bool SelfPeakAnnounced;
+        public bool OppPeakAnnounced;
+        public bool SelfDnfAnnounced;
+        public bool OppDnfAnnounced;
+        public bool OppDcAnnounced;
+        public bool RoomClosingAnnounced;
         public float DisconnectObserveUntil;
         public string DisconnectReason = "";
         public bool OpponentDepartedObserved;
@@ -108,6 +120,11 @@ namespace PeakCSR
 
         // ===== LoadingLevel 看门狗 =====
         public float LoadingSince = -1f;
+
+        // 玩家在过渡动作 (加载恢复/换房) 期间点了离开: 过渡结束后再执行, 不能直接丢掉
+        public bool PendingLeaveRequest;
+        // 实时 socket 可用时刻: 握手宽限期从这一刻起算
+        public float LiveConnectedSince = -1f;
 
         // ===== 串行化过渡 =====
         public bool TransitionInFlight;
@@ -128,6 +145,8 @@ namespace PeakCSR
         public int PendingRerollLevel;
         public int PendingRerollRoute;
         public float PendingRerollJoinDeadline;
+        // 换图新房加入失败的重试次数 (超过上限就回搜索队列)
+        public int RerollJoinAttempts;
 
         // ===== 作废延迟退房 =====
         public float RetireLobbyAt = -1f;
@@ -202,11 +221,49 @@ namespace PeakCSR
             OpponentVerified = false;
             HandshakeAcked = false;
             OpponentProgress = 0f;
+            OpponentBestCleanup();
             OpponentStamina = 1f;
             OpponentHealth = 1f;
             OpponentDown = false;
             OpponentJoinedTime = 0f;
             NextHandshakeSendTime = 0f;
+            // 对手不在了, 之前算好的开赛倒计时作废
+            StartCountdownUntil = -1f;
+            HostStartRequested = false;
+        }
+
+        // 换人/离开时清掉对手峰值
+        private void OpponentBestCleanup()
+        {
+            OppBestProgress = 0f;
+        }
+
+        // 换图/重开一局时的运行态重置 (单局对象复用但地图换了, 进度基准必须重新起算)
+        public void ResetForNewRace()
+        {
+            MyBestProgress = 0f;
+            OppBestProgress = 0f;
+            SelfProgress = 0f;
+            OpponentProgress = 0f;
+            MyRerollVoteActive = false;
+            OppRerollVoteActive = false;
+            StartAnnounced = false;
+            SelfPeakAnnounced = false;
+            OppPeakAnnounced = false;
+            SelfDnfAnnounced = false;
+            OppDnfAnnounced = false;
+            OppDcAnnounced = false;
+            RoomClosingAnnounced = false;
+            MatchStartTime = -1f;
+            StartCountdownUntil = -1f;
+            HostStartRequested = false;
+            SweepProgressState();
+        }
+
+        // 进度基准只在这里 (换局) 与开新会话时重置, 不做静态直调, 避免跨会话串味
+        private static void SweepProgressState()
+        {
+            ProgressMonotonicState.Reset();
         }
 
         // 当前这次 join 是不是恢复到"我自己刚才那局" (换图/重试/观察窗恢复都会走到这里)
@@ -219,20 +276,25 @@ namespace PeakCSR
                 || TransitionInFlight;
         }
 
-        // 该群系在地图里的段数 (依据 MapCatalog 的 biome 签名字符串)
-        // 真实段数由 SplitCapturePatch 侧观察到的进度点数量决定, 这里按已有路线长度兜底
-        public int CountSegmentsOfBiome(int levelIndex, int biomeIndex)
+        // 求本局路线在"绝对进度点索引"里的区间
+        // 必须来自游戏本体真实 progressPoints, 不能用 Splits.RouteLength 倒推
+        public bool TryResolveRouteSpan(out int routeStartIndex, out int routeLength)
         {
-            try
-            {
-                string label = _gw.GetBiomeLabel(levelIndex);
-                if (string.IsNullOrEmpty(label)) return 1;
-                return Math.Max(1, Splits.RouteLength);
-            }
-            catch
-            {
-                return 1;
-            }
+            routeStartIndex = -1;
+            routeLength = -1;
+
+            // 全山: 不需要裁剪, 直接按已记录的最大索引导出
+            if (Route <= 0) return false;
+
+            // Route 是 1-based 的群系出现序号, 先换算成真实进度点索引
+            int start;
+            int count;
+            if (!_gw.TryGetBiomePointSpan(Route - 1, out start, out count)) return false;
+            if (count <= 0) return false;
+
+            routeStartIndex = start;
+            routeLength = count;
+            return true;
         }
 
         // =====================================================================
@@ -241,6 +303,16 @@ namespace PeakCSR
         public void SyncFromRaceInfo(RaceInfo race)
         {
             if (race == null) return;
+
+            // 换房/重进期的旧房快照整体丢弃
+            if (SwitchingRerollRoom
+                && !string.IsNullOrEmpty(InviteCode)
+                && !string.IsNullOrEmpty(race.InviteCode)
+                && !string.Equals(race.InviteCode, InviteCode, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
             if (race.InviteCode != null) InviteCode = race.InviteCode;
             Seed = race.Seed;
             LevelIndex = race.LevelIndex;
@@ -286,6 +358,10 @@ namespace PeakCSR
             {
                 if (OpponentSteamId != opp.SteamId)
                 {
+                    // 换人: 上一位对手的峰值与倒计时都不能留给新对手
+                    OppBestProgress = 0f;
+                    StartCountdownUntil = -1f;
+                    HostStartRequested = false;
                     OpponentSteamId = opp.SteamId;
                     OpponentJoinedTime = Now();
                     OpponentVerified = false;
@@ -324,6 +400,8 @@ namespace PeakCSR
             if (race.Status == "loading" && State != CsMatchState.Finished)
             {
                 SwitchingRerollRoom = false;
+                // 每次进入加载阶段都重新计时
+                if (State != CsMatchState.LoadingLevel) LoadingSince = -1f;
                 State = CsMatchState.LoadingLevel;
                 StatusMessage = CsrLoc.T("status.loading_island");
             }
@@ -338,8 +416,15 @@ namespace PeakCSR
                 }
                 else
                 {
+                    // 倒计时已归零: 直接进入 Running
                     State = CsMatchState.Running;
+                    if (MatchStartTime < 0f) MatchStartTime = Now();
                     StatusMessage = CsrLoc.T("status.running", OpponentName, OpponentElo);
+                    if (!StartAnnounced)
+                    {
+                        StartAnnounced = true;
+                        _gw.PushSystemChat(CsrLoc.T("chat.match.start"));
+                    }
                 }
             }
             else if (race.Status == "running" && State != CsMatchState.Finished)
@@ -347,18 +432,37 @@ namespace PeakCSR
                 SwitchingRerollRoom = false;
                 State = CsMatchState.Running;
                 if (MatchStartTime < 0f) MatchStartTime = Now();
+
+                // 真正开赛只广播一次
+                if (!StartAnnounced)
+                {
+                    StartAnnounced = true;
+                    _gw.PushSystemChat(CsrLoc.T("chat.match.start"));
+                }
+
                 if (!MyRerollVoteActive && !OppRerollVoteActive)
                 {
                     // 对手已完赛: 说明服务端 rank 快照可能没到位, 提示约 30s 后房间自动收尾
                     if (opp != null && opp.State == "finished")
                     {
                         StatusMessage = CsrLoc.T("status.opp_finished_wait");
+                        if (!OppPeakAnnounced)
+                        {
+                            OppPeakAnnounced = true;
+                            OppDcAnnounced = true;
+                            double oppSec = (opp.TotalMs ?? 0) / 1000.0;
+                            _gw.PushSystemChat(CsrLoc.T("chat.match.opp_peak", OpponentName, CsrFormat.FormatClock(oppSec)));
+                        }
+                        // 对手先登顶后, 房间由服务端 AutoEndMs 收尾, 把倒计时也广播出去
+                        AnnounceRoomClosing();
                     }
                     else
                     {
                         StatusMessage = CsrLoc.T("status.running", OpponentName, OpponentElo);
                     }
                 }
+
+                AnnounceOpponentDnf(opp);
             }
 
             if (!SwitchingRerollRoom
@@ -372,18 +476,70 @@ namespace PeakCSR
             Notify();
         }
 
+        // ===== 对局状态广播 (每局每条只推一次) =====
+
+        // 我方登顶: 由结算路径调用 (那里才知道确切的完赛用时)
+        public void AnnounceSelfPeak(long elapsedMs)
+        {
+            if (SelfPeakAnnounced) return;
+            SelfPeakAnnounced = true;
+            string clock = CsrFormat.FormatClock(elapsedMs / 1000.0);
+            _gw.PushSystemChat(CsrLoc.T("chat.match.self_peak", clock));
+            // 等对手期间房间会在 AutoEndMs 后关闭, 顺手把倒计时也广播掉
+            AnnounceRoomClosing();
+        }
+
+        // 我方阵亡
+        public void AnnounceSelfDnf(bool isTimeout)
+        {
+            if (SelfDnfAnnounced) return;
+            SelfDnfAnnounced = true;
+            _gw.PushSystemChat(CsrLoc.T(isTimeout ? "chat.match.self_timeout" : "chat.match.self_dnf"));
+        }
+
+        // opp 传 null 表示"调用方已确认对手是真实阵亡", 只做播报不做状态复核
+        public void AnnounceOpponentDnf(RaceParticipant opp = null)
+        {
+            if (OppDnfAnnounced) return;
+            if (opp != null && opp.State != "dnf") return;
+            // 心跳停止的 dnf 是掉线, 交给掉线分支处理, 不能当成"对手阵亡"
+            if (OppDcAnnounced) return;
+            OppDnfAnnounced = true;
+            _gw.PushSystemChat(CsrLoc.T("chat.match.opp_dnf", OpponentName));
+        }
+
+        // 对手掉线/消失
+        public void AnnounceOpponentDisconnect()
+        {
+            if (OppDcAnnounced) return;
+            OppDcAnnounced = true;
+            _gw.PushSystemChat(CsrLoc.T("chat.match.opp_dc", OpponentName));
+        }
+
+        // 房间收尾倒计时 (服务端 AutoEndMs 机制, 不是 PCSR 自己关房)
+        public void AnnounceRoomClosing()
+        {
+            if (RoomClosingAnnounced) return;
+            RoomClosingAnnounced = true;
+            int seconds = _gw.AutoEndSecondsApprox;
+            _gw.PushSystemChat(CsrLoc.T("chat.match.room_closing", seconds));
+        }
+
         // 采集双方分段耗时, 用于赛后战报
         // 主数据源为自建 SplitTracker (只记录真实到达, 不填充假数据)
         private void CaptureLiveSplits(RaceParticipant self, RaceParticipant opp, RaceInfo race)
         {
             try
             {
-                // 保留一份 RANKED 原始数据作为兜底
+                // 保留一份 RANKED 原始数据作为兜底，只有本次确实读到分段时才覆盖
                 if (self != null && !string.IsNullOrEmpty(self.SteamId))
                 {
                     List<long> mine = _gw.GetLiveSplits(self.SteamId);
-                    LiveSplitsFallback.Clear();
-                    for (int i = 0; i < mine.Count; i++) LiveSplitsFallback.Add(mine[i]);
+                    if (mine != null && mine.Count > 0)
+                    {
+                        LiveSplitsFallback.Clear();
+                        for (int i = 0; i < mine.Count; i++) LiveSplitsFallback.Add(mine[i]);
+                    }
                 }
 
                 // 对手: 用 Flags >> 4 的绝对点灯数推断, 但只记录"确实前进"的那一格, 不再伪造填充
@@ -406,14 +562,17 @@ namespace PeakCSR
         // 分段名: 单群系只显示该群系内的段, 全山显示从第一段开始
         public string BuildSplitLabel(int index)
         {
-            string biome = "";
             int absoluteIndex = index;
             if (Route > 0)
             {
-                // 单群系: 本局路线从 (route-1) 号群系开始, 段名取该群系内的相对段
-                absoluteIndex = (Route - 1) + index;
+                int routeStart;
+                int routeLen;
+                if (TryResolveRouteSpan(out routeStart, out routeLen) && routeStart >= 0)
+                {
+                    absoluteIndex = routeStart + index;
+                }
             }
-            biome = _gw.GetSegmentBiomeName(LevelIndex, absoluteIndex) ?? "";
+            string biome = _gw.GetSegmentBiomeName(LevelIndex, absoluteIndex) ?? "";
             return "SEG " + (index + 1) + (string.IsNullOrEmpty(biome) ? "" : " · " + biome);
         }
 
@@ -428,21 +587,36 @@ namespace PeakCSR
             int routeStart = Splits.RouteStartIndex;
             int routeLen = Splits.RouteLength;
 
-            // 单群系: routeStart = 群系索引, routeLen = 该群系包含的段数
+            // 单群系: routeStart = 真实进度点起点, routeLen = 该群系包含的段数
             // 全山: routeStart = -1, routeLen = -1 (取已记录的最大索引)
             if (routeStart < 0 && Route > 0)
             {
-                routeStart = Math.Max(0, Route - 1);
+                int resolvedStart;
+                int resolvedLen;
+                if (TryResolveRouteSpan(out resolvedStart, out resolvedLen))
+                {
+                    routeStart = resolvedStart;
+                    routeLen = resolvedLen;
+                }
+                else
+                {
+                    // 拿不到真实区间就保持"开放长度", 不要用 Route-1 猜一个起点
+                    routeStart = -1;
+                    routeLen = -1;
+                }
             }
 
             List<long> mine = Splits.Export(mySteamId, routeStart, routeLen);
             List<long> theirs = Splits.Export(OpponentSteamId, routeStart, routeLen);
 
-            // 自建采集器完全没数据时, 才回退到 RANKED 原始分段 (仅全山, 单群系的原始数据不可信)
+            // 自建采集器完全没数据时才回退到 RANKED 原始分段。
+            // 单群系原本被排除, 但 RANKED 的 LiveSplitTrack 里存的是"绝对点灯段"的时间,
+            // 单群系只会让序列前置若干空位, 不会伪造数据, 所以展示层裁剪后依然可用,
+            // 比"整张表全空"要好得多。
             if (CountNonZero(mine) == 0 && CountNonZero(theirs) == 0
-                && Route <= 0 && LiveSplitsFallback.Count > 0)
+                && LiveSplitsFallback.Count > 0)
             {
-                PcsrLog.LogInfo("[PeakCSR] 自建分段为空，回退使用 RANKED 原始分段 (全山)。");
+                PcsrLog.LogInfo("[PeakCSR] 自建分段为空，回退使用 RANKED 原始分段 (Route=" + Route + ")。");
                 for (int i = 0; i < LiveSplitsFallback.Count; i++) mySplits.Add(LiveSplitsFallback[i]);
                 return;
             }
