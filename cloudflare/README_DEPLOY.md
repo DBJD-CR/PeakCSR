@@ -24,10 +24,25 @@
 
 **方式 A：wrangler 命令行（推荐）**
 
+> `wrangler.toml` 被 `.gitignore` 忽略（里面含个人的 D1 `database_id`），
+> 所以全新 clone 的仓库里没有它。部署前先在 `cloudflare/` 下建一个：
+
+```toml
+# cloudflare/wrangler.toml
+name = "peakcsr-ladder"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "peakcsr-db"
+database_id = "把第一步建库拿到的 ID 填这里"
+```
+
 ```powershell
 cd cloudflare
 npm install            # 首次需要
-npx wrangler deploy
+npx wrangler deploy src/index.js   # 显式入口, 不依赖 wrangler.toml 也能部署
 ```
 
 **方式 B：在线编辑器单文件拼接**
@@ -75,7 +90,14 @@ npx wrangler deploy
 
 ## 第三步补充 2：数据表
 
-新建库直接把 [`schema.sql`](schema.sql) 全选粘贴执行即可，一步到位。
+### 新建数据库（只需做这一次）
+
+打开 [`schema.sql`](schema.sql)，全选复制粘贴执行一次即可，一步到位。
+里面全是 `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`，**不会动已有数据**。
+
+### ⚠️ 破坏性重置（仅测试期用）
+
+下面的语句会**永久删除**全部玩家档案、对局历史与审计记录，重建表结构也不会把它们恢复。
 
 ```sql
 DROP TABLE IF EXISTS settled_matches;
@@ -84,7 +106,8 @@ DROP TABLE IF EXISTS players;
 DROP TABLE IF EXISTS admin_audit;
 ```
 
-然后打开 `cloudflare/schema.sql`，全选复制粘贴执行一次。
+删完之后再执行一次 [`schema.sql`](schema.sql) 重建空表。
+**已有真实玩家的库不要执行这一节**，只想清战绩请改用 `/api/admin` 的 `reset` 动作。
 
 ---
 
