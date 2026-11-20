@@ -84,18 +84,19 @@ namespace PeakCSR
                 MatchSession session = coordinator != null ? coordinator.CurrentSession : null;
                 int route = session != null ? session.Route : 0;
 
-                // 单群系: 只在本群系的进度点区间内归一, 否则分母取了整座山会严重偏小
-                // 全山: 从 0 到最后一个点, 与原版 last 语义一致
+                // 单群系: 只在该路线的进度点区间内归一, 否则分母取整座山会严重偏小
+                // 全山: 从 0 到最后一个点
                 int spanStart = 0;
                 int spanEnd = -1;
-                if (route > 0 && session != null)
+                if (coordinator != null)
                 {
-                    int biomeStart;
-                    int biomeCount;
-                    if (session.TryResolveRouteSpan(out biomeStart, out biomeCount))
+                    IRankedPeakGateway gw = coordinator.Gateway;
+                    int resolvedStart;
+                    int resolvedEnd;
+                    if (gw != null && gw.TryResolveRouteSpanFor(route, out resolvedStart, out resolvedEnd))
                     {
-                        spanStart = biomeStart;
-                        spanEnd = biomeStart + biomeCount;
+                        spanStart = resolvedStart;
+                        spanEnd = resolvedEnd;
                     }
                 }
 
@@ -106,9 +107,24 @@ namespace PeakCSR
                     info[i].Z = pts[i].Z;
                     info[i].IsNadir = pts[i].IsNadir;
                     info[i].Biome = pts[i].BiomeOrdinal;
+                    info[i].Title = pts[i].Title;
+                    info[i].BiomeRaw = pts[i].BiomeRaw;
                 }
 
-                return ProgressProjection.Compute(info, local.Center.z, spanStart, spanEnd);
+                // 段终点优先取出口篝火
+                IRankedPeakGateway gateway = coordinator != null ? coordinator.Gateway : null;
+                Func<int, float?> campfireLookup = null;
+                if (gateway != null)
+                {
+                    campfireLookup = delegate(int boundaryIdx)
+                    {
+                        float z;
+                        if (gateway.TryGetCampfireZ(boundaryIdx, out z)) return (float?)z;
+                        return null;
+                    };
+                }
+
+                return ProgressProjection.Compute(info, local.Center.z, spanStart, spanEnd, campfireLookup);
             }
             catch
             {
@@ -125,6 +141,10 @@ namespace PeakCSR
         public bool IsNadir;
         // 群系在本次山体里的出现序号 (0 起, 相邻同名群系视为同一群系)
         public int BiomeOrdinal;
+        // 段名真值
+        public string Title;
+        // 群系枚举原始整数值, 用于反查该点属于本次地图的第几个 Segment
+        public int BiomeRaw;
 
         public static ProgressPointEx[] From(Array points)
         {
@@ -145,6 +165,8 @@ namespace PeakCSR
                     MountainProgressHandler.ProgressPoint pt = p as MountainProgressHandler.ProgressPoint;
                     if (pt != null)
                     {
+                        item.Title = pt.title ?? "";
+                        item.BiomeRaw = (int)pt.biome;
                         item.IsNadir = string.Equals(pt.title, "NADIR", StringComparison.OrdinalIgnoreCase);
                         if (!Equals(pt.biome, lastBiome))
                         {

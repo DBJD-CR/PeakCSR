@@ -17,15 +17,21 @@ namespace PeakCSR
         private static bool _hasLast;
         // 上一帧是否因为完赛被强制推到 1.0
         private static bool _lockedToFinish;
+        // 锁定后连续读到"未完赛"的帧数: 用于区分"完赛状态抖动"与"锁定了伪值"
+        private static int _unfinishedFramesSinceLock;
         // 观测到的真实峰值 (不含强制值)
         private static float _observedPeak;
         private static bool _hasObserved;
+
+        // 解锁所需的连续未完赛帧数 (约 0.5 秒 @60fps)
+        private const int UnlockAfterUnfinishedFrames = 30;
 
         public static void Reset()
         {
             _lastReported = 0f;
             _hasLast = false;
             _lockedToFinish = false;
+            _unfinishedFramesSinceLock = 0;
             _observedPeak = 0f;
             _hasObserved = false;
         }
@@ -46,11 +52,12 @@ namespace PeakCSR
 
             if (finished)
             {
-                // 确认登顶: 观测峰值直接记 1.0, 返回值也强制 1.0
-                Observe(1f);
+                // 确认登顶: 返回值强制 1.0, 但观测峰值只记真实采样值
+                Observe(value);
                 _lastReported = 1f;
                 _hasLast = true;
                 _lockedToFinish = true;
+                _unfinishedFramesSinceLock = 0;
                 return 1f;
             }
 
@@ -63,17 +70,36 @@ namespace PeakCSR
             {
                 _lastReported = value;
                 _hasLast = true;
+                _lockedToFinish = false;
                 return value;
             }
 
-            // 上一帧被终局强制成 1.0, 本帧未完赛且真实值远低于它:
-            // 说明那是结算后残留的伪值, 丢弃缓存以真实值为新基准。
-            if (_lockedToFinish && value < 0.95f)
+            if (_lockedToFinish)
             {
-                Warn("[PeakCSR] 检测到进度缓存被终局伪值污染 (1.0 -> " + value.ToString("F3") + ")，已重置单调基准。");
-                _lastReported = value;
-                _lockedToFinish = false;
-                return value;
+                // 完赛状态抖动: 短时间内还不能认定 1.0 是伪值, 保持现状
+                _unfinishedFramesSinceLock++;
+                if (value < 0.95f && _unfinishedFramesSinceLock >= 2)
+                {
+                    // 真实回退幅度很大: 立刻丢弃缓存以真实值为新基准
+                    Warn("[PeakCSR] 检测到进度缓存被终局伪值污染 (1.0 -> " + value.ToString("F3") + ")，已重置单调基准。");
+                    _lastReported = value;
+                    _lockedToFinish = false;
+                    _unfinishedFramesSinceLock = 0;
+                    return value;
+                }
+                if (value < 0.99f && _unfinishedFramesSinceLock >= UnlockAfterUnfinishedFrames)
+                {
+                    // 持续未完赛且进度明显没到顶: 之前的 finished 是伪值。
+                    // 阈值取 0.99 而不是 0.999, 避免"已经在终点附近"的局被误判成未完成而掉回 99.8%
+                    Warn("[PeakCSR] 完赛状态已消失且进度未达顶 (" + value.ToString("F3") + ")，解除 100% 强制锁。");
+                    _lastReported = value;
+                    _lockedToFinish = false;
+                    _unfinishedFramesSinceLock = 0;
+                    return value;
+                }
+                // 仍处于锁定: 对外保持 1.0
+                _lastReported = 1f;
+                return 1f;
             }
 
             // 单调不减, 容忍极小幅回落吸收采样噪声

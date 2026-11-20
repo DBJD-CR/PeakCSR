@@ -1,3 +1,5 @@
+using System;
+
 namespace PeakCSR
 {
     // 进度点的轻量投影 (避免 Core 层反射游戏类型)
@@ -8,6 +10,10 @@ namespace PeakCSR
         public bool IsNadir;
         // 该点所属群系在本次地图中的序号 (用于按群系统计段数)
         public int Biome;
+        // 段名真值
+        public string Title;
+        // 群系枚举原始值, 用于反查该点属于本次地图的第几个 Segment
+        public int BiomeRaw;
     }
 
     // 进度几何计算 (纯函数, 不持有任何状态)
@@ -33,7 +39,19 @@ namespace PeakCSR
         // routeStartIndex:  本局路线的起点进度点索引 (全山传 0)
         // routeEndIndex:    本局路线的终点进度点索引 (全山传 last)
         // 返回 0..1; 无可用点时返回 -1
+        //
+        // 注意: 这个重载不接受篝火坐标, 终点会退化为"下一个进度点"
+        // 需要精确到 100% 收敛的调用方请用带 CampfireZLookup 的重载
         public static float Compute(ProgressPointInfo[] pts, float centerZ, int routeStartIndex, int routeEndIndex)
+        {
+            return Compute(pts, centerZ, routeStartIndex, routeEndIndex, null);
+        }
+
+        // campfireZAt: (段终点进度点索引) -> 该处出口篝火 Z, 取不到返回 null
+        public static float Compute(
+            ProgressPointInfo[] pts, float centerZ,
+            int routeStartIndex, int routeEndIndex,
+            Func<int, float?> campfireZAt)
         {
             if (pts == null || pts.Length < 2) return -1f;
 
@@ -48,42 +66,89 @@ namespace PeakCSR
             if (spanEnd > last) spanEnd = last;
             if (spanEnd <= spanStart) spanEnd = last;
 
+            // 段终点坐标: 优先篝火, 退化时才用进度点
+            float endZ = ResolveEndZ(pts, spanEnd, campfireZAt, last);
+
             // 关键: 索引只由"真实位置"决定, 不使用 maxProgressPointReached。
             // 与游戏 CheckReached 同判据 (Center.z > point.z), 但这里只取插值区间。
             int reached = -1;
+            int positionedCount = 0;
             for (int i = 0; i <= last; i++)
             {
                 if (!pts[i].HasPosition) continue;
+                positionedCount++;
                 if (centerZ > pts[i].Z) reached = i;
             }
 
+            // 几何不可用, 交给调用方回退到 raw
+            if (positionedCount == 0) return -1f;
+
             // 还没越过第一个点: 位于起点之前的引道, 视为 0
             if (reached < 0) return 0f;
-            // 已越过最后一个点: 真正到顶
-            if (reached >= last) return 1f;
 
-            // 段内插值: 用 Z 比例, 与 RANKED 的 num6 同义但索引取自真实位置
-            float span = pts[reached + 1].Z - pts[reached].Z;
-            float frac;
-            if (!pts[reached + 1].HasPosition || span <= 0.5f)
+            float startZ = pts[spanStart].HasPosition ? pts[spanStart].Z : pts[0].Z;
+            // 已经越过整个路线终点段: 真正到顶
+            if (reached >= spanEnd && centerZ >= endZ) return 1f;
+
+            // 段内插值: 每段用自己的 [点Z, 段终点Z] 区间
+            float absolute = 0f;
+            float totalSpan = 0f;
+            float acc = 0f;
+            for (int i = spanStart; i <= spanEnd; i++)
             {
-                // 两点 Z 重合/倒序 (PEAK 之后的折返): 无法插值, 保守取段末
-                frac = 1f;
-            }
-            else
-            {
-                frac = (centerZ - pts[reached].Z) / span;
-                if (frac < 0f) frac = 0f;
-                if (frac > 1f) frac = 1f;
+                float segStartZ = PickZ(pts, i, startZ);
+                float segEndZ = (i == spanEnd) ? endZ : PickZ(pts, i + 1, segStartZ);
+                float segSpan = segEndZ - segStartZ;
+                if (segSpan <= 0.5f) segSpan = 0.5f;
+                totalSpan += segSpan;
+
+                if (centerZ >= segStartZ)
+                {
+                    // 玩家已进入 (或越过) 这一段: 累加整段, 最后一小段做插值
+                    float localFrac = (centerZ - segStartZ) / segSpan;
+                    if (localFrac > 1f) localFrac = 1f;
+                    if (i == spanEnd)
+                    {
+                        acc += localFrac * segSpan;
+                    }
+                    else
+                    {
+                        acc += segSpan;
+                    }
+                }
+                // centerZ < segStartZ 时后续段一律未到达, 不再累加
             }
 
-            float absolute = reached + frac;              // 0..last 的连续绝对位置
-            float total = spanEnd - spanStart;
-            if (total <= 0f) total = last;
-            float result = (absolute - spanStart) / total;
+            absolute = acc;
+            if (totalSpan <= 0.01f) return 0f;
+            float result = absolute / totalSpan;
             if (result < 0f) result = 0f;
             if (result > 1f) result = 1f;
             return result;
+        }
+
+        private static float PickZ(ProgressPointInfo[] pts, int index, float fallback)
+        {
+            if (index < 0 || index >= pts.Length) return fallback;
+            return pts[index].HasPosition ? pts[index].Z : fallback;
+        }
+
+        // 段终点 Z: 篝火优先, 取不到才回退到进度点
+        private static float ResolveEndZ(ProgressPointInfo[] pts, int spanEnd, Func<int, float?> campfireZAt, int last)
+        {
+            if (campfireZAt != null)
+            {
+                try
+                {
+                    float? fireZ = campfireZAt(spanEnd);
+                    if (fireZ.HasValue) return fireZ.Value;
+                }
+                catch
+                {
+                }
+            }
+            if (spanEnd < pts.Length && pts[spanEnd].HasPosition) return pts[spanEnd].Z;
+            return pts[last].HasPosition ? pts[last].Z : 0f;
         }
     }
 }
