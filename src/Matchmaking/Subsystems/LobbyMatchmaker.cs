@@ -329,18 +329,8 @@ namespace PeakCSR
             session.Route = race.Route;
 
             // 登记本局路线区间, 供分段采集裁剪使用
-            // 单群系: 起点/长度都来自真实进度点表
-            // 全山: -1 / -1 表示取已记录的最大索引
-            int routeStart;
-            int routeLen;
-            if (session.TryResolveRouteSpan(out routeStart, out routeLen))
-            {
-                session.Splits.SetRoute(routeStart, routeLen);
-            }
-            else
-            {
-                session.Splits.SetRoute(-1, -1);
-            }
+            session.Splits.Clear();
+            session.EnsureRouteSpanRegistered();
 
             // 记录本机"当前这局"的房号, 供幽灵房判定区分"我自己的局"和"别人的残局"
             if (!string.IsNullOrEmpty(race.InviteCode))
