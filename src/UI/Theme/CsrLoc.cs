@@ -161,6 +161,8 @@ namespace PeakCSR
             { "chat.match.opp_dc", PcsrColors.Wrap(PcsrColors.VoidAmber, "[PCSR] 对手 [{0}] 已掉线，本局作废，双方均不计分。") },
             { "chat.match.room_closing", PcsrColors.Wrap(PcsrColors.Warning, "[PCSR] 本局已结束，房间将在 {0} 秒后自动关闭。") },
             { "chat.match.settled", PcsrColors.Wrap(PcsrColors.PositiveBright, "[PCSR] 云端结算完成：当前 {0} ELO ({1})") },
+            // 双方几乎同时登顶: 用时差在采样分辨力以内, 不做抛硬币式判分
+            { "status.void_peak_tie", "双方几乎同时登顶，无法分辨先后，本局作废不计分" },
 
             { "antiboost.unrated", "好友练习赛 (不计 ELO)" },
             { "antiboost.self", "检测到自建小号对局 (本次不计 ELO)" },
@@ -225,6 +227,7 @@ namespace PeakCSR
             { "post.elo.detail2", "赛前 <b>{0}</b>  ->  当前 <b>{1}</b>   |   基础变动: {2}   |   进度补偿: {3}   |   保底/倍率修正: {4}   |   我方进度: {5}% vs 对手: {6}%" },
             { "post.tier.changed", "   <size=70%>" + PcsrColors.Wrap(PcsrColors.Positive, "(段位变动)") + "</size>" },
             { "post.splits.missing", "未记录" },
+            { "post.splits.unreached", "未到达" },
             { "win.lbl.format", "赛制选择" },
             { "win.lbl.ascent", "天阶难度" },
             { "win.lbl.ascent_value", "天阶 {0}" },
@@ -409,6 +412,7 @@ namespace PeakCSR
             { "chat.match.opp_dc", PcsrColors.Wrap(PcsrColors.VoidAmber, "[PCSR] Opponent [{0}] disconnected. This match is VOID - no ELO change.") },
             { "chat.match.room_closing", PcsrColors.Wrap(PcsrColors.Warning, "[PCSR] Match over. The room will close in {0}s.") },
             { "chat.match.settled", PcsrColors.Wrap(PcsrColors.PositiveBright, "[PCSR] Cloud settlement done: {0} ELO ({1})") },
+            { "status.void_peak_tie", "Both players peaked almost simultaneously; result cannot be determined, match voided" },
 
             { "antiboost.unrated", "Unrated Private Match (0 ELO)" },
             { "antiboost.self", "Self-match detected (0 ELO change)" },
@@ -473,6 +477,7 @@ namespace PeakCSR
             { "post.elo.detail2", "Before <b>{0}</b>  ->  After <b>{1}</b>   |   Base: {2}   |   Progress: {3}   |   Floor/Mult: {4}   |   Progress: {5}% vs {6}%" },
             { "post.tier.changed", "   <size=70%>" + PcsrColors.Wrap(PcsrColors.Positive, "(tier changed)") + "</size>" },
             { "post.splits.missing", "not recorded" },
+            { "post.splits.unreached", "unreached" },
             { "win.lbl.format", "Ruleset" },
             { "win.lbl.ascent", "Difficulty" },
             { "win.lbl.ascent_value", "{0}" },

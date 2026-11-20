@@ -6,9 +6,8 @@ using UnityEngine.UI;
 
 namespace PeakCSR
 {
-    // 赛后战报独立窗口 + ELO 滚动与双进度条补间动画 (原 PcsrMenuWindow 战报面板拆分)
-    // 弹出时机: 对局结束后先挂"可查看"标记, 等结算界面关闭 (EndScreenLifecyclePatch 事件) 或
-    // 回到主菜单后才自动弹出, 不糊脸
+    // 赛后战报独立窗口 + ELO 滚动与双进度条补间动画
+    // 弹出时机: 一方登顶、胜负裁定完成时立刻弹出, 双方对称, 不做任何延迟。
     public sealed class PostMatchReportView : MonoBehaviour
     {
         private const float BoxPad = 24f;
@@ -48,131 +47,29 @@ namespace PeakCSR
         private float _barToNew;
         private bool _barCrossedTier;
 
-        // 战报延迟弹出状态
-        private static bool _postPending;
-        private bool _postAutoShown;
-        private bool _sawEndScreen;
-
         public bool IsOpen { get { return _postOpen; } }
 
         private void Awake()
         {
             Instance = this;
-            EventBus.OnMatchStateChanged += OnMatchStateChanged;
-            EventBus.OnEndScreenClosed += OnEndScreenClosed;
-        }
-
-        private void OnDestroy()
-        {
-            EventBus.OnMatchStateChanged -= OnMatchStateChanged;
-            EventBus.OnEndScreenClosed -= OnEndScreenClosed;
-        }
-
-        // 新一局开始 (或回到待机) 时, 上一局挂着未弹出的战报先清掉
-        private void OnMatchStateChanged()
-        {
-            MatchCoordinator mc = MatchCoordinator.Instance;
-            CsMatchState state = mc != null ? mc.State : CsMatchState.Idle;
-            if (state == CsMatchState.Idle
-                || state == CsMatchState.SearchingLobby
-                || state == CsMatchState.WaitingOpponent)
-            {
-                if (!_postOpen) ClearPendingPostMatch();
-            }
         }
 
         private void Update()
         {
             if (_postOpen) TickPostMatchAnimation();
-            TickPendingPostMatch();
         }
 
-        // ===== 战报延迟弹出 =====
-
-        // 对局结束后调用: 只挂标记, 不糊脸
-        public static void MarkPostMatchPending()
-        {
-            _postPending = true;
-            if (Instance != null) Instance._postAutoShown = false;
-        }
-
-        public static bool HasPendingPostMatch { get { return _postPending; } }
-
-        public static void ClearPendingPostMatch()
-        {
-            _postPending = false;
-        }
-
-        // 战报弹出时机: 必须等 (1) 见过原生结算界面且其已关闭 (EndScreenClosed 事件),
-        // 或 (2) 对局结束后经过完整的 2 秒缓冲仍未见结算界面 (作废局等无结算画面的场景)。
-        // 旧实现把"2 帧"当"2 秒"用, 战报会在结算画面上直接糊脸弹出。
-        private const float PendingGraceSeconds = 2f;
-        private float _pendingSince = -1f;
-        private bool _endScreenSeenAndClosed;
-
-        private void TickPendingPostMatch()
-        {
-            if (!_postPending || _postAutoShown) return;
-            if (LastPostMatch == null) return;
-
-            // 结算画面正在显示: 记录"见过", 持续等待其关闭事件
-            bool endScreenAlive = false;
-            try
-            {
-                endScreenAlive = Object.FindAnyObjectByType<EndScreen>() != null;
-            }
-            catch
-            {
-            }
-
-            if (endScreenAlive)
-            {
-                _sawEndScreen = true;
-                _pendingSince = -1f;
-                return;
-            }
-
-            // 结算画面已见过但还没等到关闭事件: 等待 (返回机场/倒计时结束会触发 EndScreenClosed)
-            if (_sawEndScreen && !_endScreenSeenAndClosed)
-            {
-                // 防御: 若事件因故丢失 (玩家手动销毁了场景对象), 用 5 秒兜底计时放行
-                if (_pendingSince < 0f) _pendingSince = Time.unscaledTime;
-                if (Time.unscaledTime - _pendingSince < 5f) return;
-                _endScreenSeenAndClosed = true;
-            }
-
-            // 从未见过结算界面 (作废局/异常局): 从挂起标记起算 2 秒缓冲后放行
-            if (!_sawEndScreen)
-            {
-                if (_pendingSince < 0f) _pendingSince = Time.unscaledTime;
-                if (Time.unscaledTime - _pendingSince < PendingGraceSeconds) return;
-            }
-
-            _postAutoShown = true;
-            _postPending = false;
-            ShowPostMatch(LastPostMatch);
-        }
-
-        // 结算画面关闭事件 (EndScreenLifecyclePatch 经 EventBus 派发)
-        private void OnEndScreenClosed()
-        {
-            if (_sawEndScreen)
-            {
-                _endScreenSeenAndClosed = true;
-            }
-            _sawEndScreen = true;
-        }
-
+        // 结算完成即调用: 立即展示, 双方对称, 无延迟
         public static void ShowPostMatchWindow()
         {
+            if (LastPostMatch == null) return;
             if (Instance == null)
             {
                 GameObject go = new GameObject("PeakCSR_PostMatchReport");
                 DontDestroyOnLoad(go);
                 go.AddComponent<PostMatchReportView>();
             }
-            if (LastPostMatch == null) return;
-            _postPending = false;
+            if (Instance == null) return;
             Instance.ShowPostMatch(LastPostMatch);
         }
 
@@ -187,9 +84,6 @@ namespace PeakCSR
             _postRoot.gameObject.SetActive(true);
             _postRoot.SetAsLastSibling();
             _postOpen = true;
-            _sawEndScreen = false;
-            _endScreenSeenAndClosed = false;
-            _pendingSince = -1f;
             NativeUiFactory.EnsureCanvasAlive();
             NativeUiFactory.EnsureTopMost();
 
@@ -474,8 +368,13 @@ namespace PeakCSR
                 }
 
                 CsrSplitRow row = data.Splits[i];
-                string myText = row.MyMs > 0 ? CsrFormat.FormatClockMs(row.MyMs) : CsrLoc.T("post.splits.missing");
-                string oppText = row.OppMs > 0 ? CsrFormat.FormatClockMs(row.OppMs) : CsrLoc.T("post.splits.missing");
+                // 未到达 与 到达但无记录 要区分: 前者是对手真的没跑到, 后者才是数据缺失
+                string myText = row.MyMs > 0
+                    ? ((row.MyEstimated ? "~" : "") + CsrFormat.FormatClockMs(row.MyMs))
+                    : (row.MyReached ? CsrLoc.T("post.splits.missing") : CsrLoc.T("post.splits.unreached"));
+                string oppText = row.OppMs > 0
+                    ? ((row.OppEstimated ? "~" : "") + CsrFormat.FormatClockMs(row.OppMs))
+                    : (row.OppReached ? CsrLoc.T("post.splits.missing") : CsrLoc.T("post.splits.unreached"));
 
                 string deltaText = "-";
                 string deltaHex = PcsrColors.VoidTone;
@@ -507,42 +406,26 @@ namespace PeakCSR
             }
         }
 
+        // 再来一局: 回主菜单并在到达后自动开始匹配 (沿用上一把的赛制/难度/计分设置)
         private void OnPostRematchClicked()
         {
             ClosePostMatch();
-            MatchCoordinator mc = MatchCoordinator.Instance;
-            if (mc != null)
-            {
-                mc.LeaveMatch();
-                mc.Queue1v1();
-            }
+            MatchTeardownService.EnsureInitialized();
+            MatchTeardownService.ReturnToMainMenu(true);
         }
 
+        // 返回主菜单: 与"再来一局"共用同一条收尾路径, 只是不自动排队
         private void OnPostMenuClicked()
         {
             ClosePostMatch();
-            MatchCoordinator mc = MatchCoordinator.Instance;
-            if (mc != null) mc.LeaveMatch();
-            try
-            {
-                // 优先走原版返回机场, 避免多人大厅等待卡死
-                EndScreen screen = Object.FindAnyObjectByType<EndScreen>();
-                if (screen != null)
-                {
-                    screen.ReturnToAirport();
-                }
-            }
-            catch (System.Exception ex)
-            {
-                PcsrLog.LogWarning("[PeakCSR] 返回机场失败: " + ex.Message);
-            }
+            MatchTeardownService.EnsureInitialized();
+            MatchTeardownService.ReturnToMainMenu(false);
         }
 
         public void ClosePostMatch()
         {
             if (_postRoot != null) _postRoot.gameObject.SetActive(false);
             _postOpen = false;
-            _postPending = false;
         }
     }
 }

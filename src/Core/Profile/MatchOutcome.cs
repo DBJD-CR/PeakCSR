@@ -25,11 +25,21 @@ namespace PeakCSR
     }
 
     // 赛后战报中的单个赛段对比行
+    // Label 是稳定段名 (progressPoints[i].title), 可直接当 best time 字典的 key
     public class CsrSplitRow
     {
         public string Label;
+        // 该段累计用时 (不是净用时), 与计时器口径一致
         public long MyMs;
         public long OppMs;
+        // true 表示这条时间来自"跳帧回填", UI 上用 ~ 前缀提示精度略低
+        public bool MyEstimated;
+        public bool OppEstimated;
+        // false 表示该玩家没到达这一段 (区别于"到达但没记录")
+        public bool MyReached;
+        public bool OppReached;
+        // 本局路线终点段 (单群系迷你跑通常只有这一段)
+        public bool IsFinal;
     }
 
     // PCSR 专属赛后战报数据快照 (原 MatchController.CsrPostMatchData, 零行为变化)
