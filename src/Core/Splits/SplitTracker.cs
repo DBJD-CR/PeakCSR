@@ -130,14 +130,15 @@ namespace PeakCSR
                 return result;
             }
 
-            // 全山: 取已记录到的最大索引
+            // 未知长度 (routeLength <= 0): 从本局路线起点开始导出
             if (!hasMap || map == null || map.Count == 0) return result;
-            int maxIndex = 0;
+            int startIndex = routeStartIndex >= 0 ? routeStartIndex : 0;
+            int maxIndex = startIndex;
             foreach (KeyValuePair<int, long> kv in map)
             {
                 if (kv.Key > maxIndex) maxIndex = kv.Key;
             }
-            for (int i = 0; i <= maxIndex; i++)
+            for (int i = startIndex; i <= maxIndex; i++)
             {
                 long ms = 0;
                 map.TryGetValue(i, out ms);
