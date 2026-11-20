@@ -176,15 +176,32 @@ namespace PeakCSR
         }
 
         // 云端权威分数覆盖 (只动分数, 不动战绩口径)
-        public void ApplyCloudAuthoritativeElo(int cloudElo)
+        // 云端在上报"等待对手/待上游核验"时响应体里没有 elo 字段,
+        // 解析层会给出 0。0 绝不是一个合法权威分, 必须整条丢弃
+        public bool ApplyCloudAuthoritativeElo(int cloudElo)
         {
+            if (!IsPlausibleCloudElo(cloudElo))
+            {
+                PcsrLog.LogWarning("[PeakCSR] 云端权威分不可信 (" + cloudElo + ")，本次不落地，保留本地分数 " + Elo + "。");
+                return false;
+            }
             Elo = Math.Max(EloEngine.EloClampMin, Math.Min(EloEngine.EloClampMax, cloudElo));
             if (Elo > PeakElo) PeakElo = Elo;
+            return true;
+        }
+
+        // 云端权威分合法性判定: 0 / 负数 / 超出地上限 都不是真实分数
+        public static bool IsPlausibleCloudElo(int cloudElo)
+        {
+            if (cloudElo <= 0) return false;
+            if (cloudElo > EloEngine.EloClampMax) return false;
+            return true;
         }
 
         // 云端权威档案覆盖 (含分赛制战绩)
         // draws: 云端平局数, 传 -1 表示未拿到权威档案 (本地计分赛不会产生平局, 保留现值)
-        public void ApplyCloudAuthoritativeState(
+        // 返回 false 表示云端分数不可信, 整份档案未落地
+        public bool ApplyCloudAuthoritativeState(
             int elo, int peak, int wins, int losses, int draws, int streak,
             int winsAllPeak, int lossesAllPeak,
             int winsHardcore, int lossesHardcore,
@@ -192,6 +209,12 @@ namespace PeakCSR
             int favoriteMap, int favoriteAscent, int favoriteFormat,
             int biomeCount)
         {
+            // 分数不可信时整份档案都不采纳
+            if (!IsPlausibleCloudElo(elo))
+            {
+                PcsrLog.LogWarning("[PeakCSR] 云端权威档案分数不可信 (" + elo + ")，整份档案本次不落地。");
+                return false;
+            }
             Elo = Math.Max(EloEngine.EloClampMin, Math.Min(EloEngine.EloClampMax, elo));
             PeakElo = Math.Max(Elo, peak);
             Wins = Math.Max(0, wins);
@@ -211,6 +234,7 @@ namespace PeakCSR
             if (favoriteMap >= 0 && favoriteMap < biomeCount) FavoriteMap = favoriteMap;
             if (favoriteAscent > -900) FavoriteAscent = favoriteAscent;
             if (favoriteFormat >= 0) FavoriteFormat = favoriteFormat;
+            return true;
         }
 
         // 本地存档签名篡改时清零 (与旧行为一致: 回到初始分并清空统计)

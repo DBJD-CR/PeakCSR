@@ -230,10 +230,15 @@ namespace PeakCSR
                         e.MyProgress, e.OppProgress, e.IsVoid, e.VoidReason,
                         r => { delivered = r; }, false);
 
-                    if (delivered != null && delivered.Settled)
+                    if (delivered != null && delivered.HasAuthoritativeElo)
                     {
                         _pendingReports.Remove(e);
-                        _profile.ApplyCloudAuthoritativeElo(delivered.AuthElo);
+                        if (!_profile.ApplyCloudAuthoritativeElo(delivered.AuthElo))
+                        {
+                            // 分数不可信: 队列条目已移除 (云端确实结算了), 但不污染本地档案
+                            PcsrLog.LogWarning("[PeakCSR] 待补传战报补发结算但权威分不可信，保留本地档案。");
+                            continue;
+                        }
                         _cloudStatus = new CloudStatusView
                         {
                             Kind = delivered.IsVoid ? CloudStatusKind.Voided : CloudStatusKind.Settled,
@@ -491,13 +496,15 @@ namespace PeakCSR
                         PushFavoriteProfile(rec.FavoriteMap, _profile.FavoriteAscent, _profile.FavoriteFormat);
                     }
 
-                    _profile.ApplyCloudAuthoritativeState(
+                    if (_profile.ApplyCloudAuthoritativeState(
                         p.Elo, p.PeakElo, p.Wins, p.Losses, p.Draws, p.Streak,
                         p.WinsAllPeak, p.LossesAllPeak,
                         p.WinsHardcore, p.LossesHardcore,
                         p.WinsSprint, p.LossesSprint,
-                        p.FavoriteMap, p.FavoriteAscent, p.FavoriteFormat);
-                    PcsrLog.LogInfo("[PeakCSR] 已从云端天梯同步权威档案: " + p.Elo + " ELO");
+                        p.FavoriteMap, p.FavoriteAscent, p.FavoriteFormat))
+                    {
+                        PcsrLog.LogInfo("[PeakCSR] 已从云端天梯同步权威档案: " + p.Elo + " ELO");
+                    }
                 }
             });
             if (!done) { }
@@ -537,11 +544,11 @@ namespace PeakCSR
             _historyLoading = false;
             if (!ok) PcsrLog.LogInfo("[PeakCSR] 历史战绩拉取失败，保留上一次的结果。");
 
-            // 加载期间被压下的强制刷新, 在这里补跑一次
+            // 加载期间被压下的强制刷新, 无条件补跑一次
             if (_historyForcePending)
             {
                 _historyForcePending = false;
-                if (ok) StartCoroutine(FetchHistoryRoutine());
+                StartCoroutine(FetchHistoryRoutine());
             }
         }
 
@@ -572,11 +579,14 @@ namespace PeakCSR
             long durationMs, float myProgress01, float oppProgress01, bool isVoid, string voidReason)
         {
             CloudLadderClient.ReportResult delivered = null;
+            // 回调是否真的给过结果: 用它决定协程末尾要不要兜底成 Pending
+            bool callbackReturned = false;
             yield return _client.ReportMatch(inviteCode, opponentSteamId, opponentName, opponentElo,
                 winnerSteamId, seed, levelIndex, ascent, format, route, durationMs, myProgress01, oppProgress01,
                 isVoid, voidReason,
                 delegate(CloudLadderClient.ReportResult r)
                 {
+                    callbackReturned = true;
                     // 这里只更新状态文案, 不做权威分数覆盖 (云端还没算)
                     if (r == null)
                     {
@@ -591,16 +601,29 @@ namespace PeakCSR
                         PcsrLog.LogWarning("[PeakCSR] 战报上报失败，已转入待补传队列，稍后自动补发。");
                         return;
                     }
+                    // 云端已受理但在等对手/待上游核验 (pending_opponent_or_upstream):
+                    // 这种响应没有权威分, 绝不能拿去覆盖本地档案
+                    if (!r.HasAuthoritativeElo)
+                    {
+                        _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Pending };
+                        PcsrLog.LogInfo("[PeakCSR] 云端已受理本局 (等待对手上报或上游核验)，未取得权威分 "
+                            + "(AuthElo=" + r.AuthElo + ")，不覆盖本地档案。");
+                        return;
+                    }
                     delivered = r;
+                    if (!_profile.ApplyCloudAuthoritativeElo(r.AuthElo))
+                    {
+                        // 云端回了结算但分数不合法: 记错误状态, 绝不落地
+                        _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Error, Detail = "implausible_elo" };
+                        PcsrLog.LogWarning("[PeakCSR] 云端结算权威分不可信 (" + r.AuthElo + ")，保留本地档案。");
+                        return;
+                    }
                     if (r.IsVoid)
                     {
-                        // 作废局: 云端分数不变, 直接用云端权威值校正本地
-                        _profile.ApplyCloudAuthoritativeElo(r.AuthElo);
                         _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Voided, Elo = r.AuthElo };
                     }
                     else
                     {
-                        _profile.ApplyCloudAuthoritativeElo(r.AuthElo);
                         _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Settled, Elo = r.AuthElo, Detail = r.VerifyMethod };
                     }
                     PcsrLog.LogInfo("[PeakCSR] 云端天梯权威结算完成 (" + r.VerifyMethod + ") -> 当前 ELO: " + r.AuthElo);
@@ -611,8 +634,12 @@ namespace PeakCSR
 
             if (delivered == null)
             {
-                // 队列兜底: 这里只在异常情况 (协程被提前打断) 兜一手, 保证不会静默丢失。
-                _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Pending };
+                // 队列兜底: 只在回调压根没到达 (协程被打断) 时兜一手。
+                // 已经拿到 Failed 结果时保留 Error 状态, 让玩家能区分"投递失败"与"等对手"
+                if (!callbackReturned)
+                {
+                    _cloudStatus = new CloudStatusView { Kind = CloudStatusKind.Pending };
+                }
             }
             else
             {

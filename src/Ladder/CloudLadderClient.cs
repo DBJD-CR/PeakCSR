@@ -484,8 +484,8 @@ namespace PeakCSR
             if (onDone != null) onDone(false, errCode);
         }
 
-        // 上报重试节奏 (秒)，这里改成覆盖 40 秒的阶梯重试, 让双方上报一定能撞上
-        private static readonly float[] ReportRetryDelays = { 0f, 3f, 8f, 15f, 25f, 38f };
+        // 上报重试节奏 (秒)
+        private static readonly float[] ReportRetryOffsets = { 0f, 3f, 8f, 15f, 25f, 38f };
 
         public IEnumerator ReportMatch(
             string inviteCode, string opponentSteamId, string opponentName, int opponentElo,
@@ -544,12 +544,15 @@ namespace PeakCSR
                 ["signature"] = sig
             };
 
-            int attempts = useRetryLadder ? ReportRetryDelays.Length : 1;
+            int attempts = useRetryLadder ? ReportRetryOffsets.Length : 1;
             ReportResult lastResult = null;
             for (int attempt = 0; attempt < attempts; attempt++)
             {
-                float delay = ReportRetryDelays[attempt];
-                if (useRetryLadder && delay > 0f) yield return new WaitForSecondsRealtime(delay);
+                if (useRetryLadder && attempt > 0)
+                {
+                    float gap = ReportRetryOffsets[attempt] - ReportRetryOffsets[attempt - 1];
+                    if (gap > 0f) yield return new WaitForSecondsRealtime(gap);
+                }
 
                 ReportResult result = null;
                 string lastError = null;
@@ -610,6 +613,7 @@ namespace PeakCSR
             ReportResult failed = new ReportResult();
             failed.Failed = true;
             failed.VerifyMethod = "report_failed";
+            failed.AuthElo = -1;
             if (onSettled != null) onSettled(failed);
         }
 
@@ -617,10 +621,17 @@ namespace PeakCSR
         {
             public bool Settled;
             public bool IsVoid;
-            public int AuthElo;
+            // -1 表示响应里没有权威分 (云端仍在等对手/待上游核验)。
+            public int AuthElo = -1;
             public string VerifyMethod = "cloud";
             // 服务器根本没有给出可用响应 (网络失败/无法解析): 与"已受理但等对手"必须区分开
             public bool Failed;
+
+            // 只有"已结算 + 拿到合法权威分"才允许覆盖本地档案
+            public bool HasAuthoritativeElo
+            {
+                get { return Settled && AuthElo > 0; }
+            }
         }
 
         private static ReportResult ParseReportResponse(string body)
@@ -633,7 +644,13 @@ namespace PeakCSR
                 ReportResult r = new ReportResult();
                 r.Settled = settled;
                 r.IsVoid = resp["isVoid"] != null && resp["isVoid"].Type != JTokenType.Null && resp["isVoid"].Value<bool>();
-                r.AuthElo = resp["elo"] != null ? resp["elo"].Value<int>() : 0;
+                // pending_opponent_or_upstream 响应里没有 elo 字段, 必须保持 -1 而不是 0
+                JToken eloToken = resp["elo"];
+                if (eloToken != null && eloToken.Type != JTokenType.Null)
+                {
+                    try { r.AuthElo = eloToken.Value<int>(); }
+                    catch { r.AuthElo = -1; }
+                }
                 r.VerifyMethod = resp["verifyMethod"] != null ? resp["verifyMethod"].ToString() : "cloud";
                 return r;
             }
