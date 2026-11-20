@@ -44,6 +44,8 @@ namespace PeakCSR
         private readonly TextMeshProUGUI[] _colModes = new TextMeshProUGUI[8];
         private readonly Button[] _rowButtons = new Button[8];
         private readonly Image[] _rowStripes = new Image[8];
+        // 每一行当前"画出来的"条目快照: 点行时按它取, 不按实时的 svc.Entries 取
+        private readonly CloudRankEntry[] _rowEntries = new CloudRankEntry[8];
         private TextMeshProUGUI _lblBoardEmpty;
         // 表头整组 (底色条 + 各列表头), 数据为空时整体隐藏
         private readonly List<GameObject> _boardHeaderParts = new List<GameObject>();
@@ -156,10 +158,10 @@ namespace PeakCSR
 
         private void OnBoardRowClicked(int index)
         {
-            LadderSyncService svc = LadderSyncService.Instance;
-            if (svc == null || svc.Entries == null || index >= svc.Entries.Count) return;
-            CloudRankEntry e = svc.Entries[index];
-            if (string.IsNullOrEmpty(e.SteamId)) return;
+            // 用绘制时存下的条目
+            if (index < 0 || index >= _rowEntries.Length) return;
+            CloudRankEntry e = _rowEntries[index];
+            if (e == null || string.IsNullOrEmpty(e.SteamId)) return;
             _host.OpenProfileCard(e);
         }
 
@@ -205,9 +207,14 @@ namespace PeakCSR
                     UiKit.SetActive(_colModes[i], has);
                     UiKit.SetActive(_rowButtons[i], has);
                     UiKit.SetActive(_rowStripes[i], has);
-                    if (!has) continue;
+                    if (!has)
+                    {
+                        _rowEntries[i] = null;
+                        continue;
+                    }
 
                     CloudRankEntry e = svc.Entries[i];
+                    _rowEntries[i] = e;
                     string tierHex = TierCatalog.GetTierHexColorOnLight(e.Elo);
                     string name = e.DisplayName;
                     if (string.IsNullOrEmpty(name)) name = CsrLoc.T("common.anonymous");

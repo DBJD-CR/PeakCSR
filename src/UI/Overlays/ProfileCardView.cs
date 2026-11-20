@@ -342,23 +342,53 @@ namespace PeakCSR
             _profileOpen = true;
             _profileIsSelf = true;
             _profileSteamId = mySteamId;
-            UiKit.SetActive(_profileNickLabel, true);
-            UiKit.SetActive(_profileNickInput, true);
-            UiKit.SetActive(_profileNickSave, true);
-            UiKit.SetActive(_profileNickHint, true);
-            UiKit.SetActive(_profileBiomeLabel, true);
-            UiKit.SetActive(_profileBiomeDropdown, true);
             NativeUiFactory.EnsureCanvasAlive();
             NativeUiFactory.EnsureTopMost();
 
             // 先用本地已知数据铺底, 云端回来后再覆盖
             CloudProfile cached = svc.CachedProfile(mySteamId);
-            if (cached != null) RenderProfile(mySteamId, cached);
+            if (cached != null)
+            {
+                RenderProfile(mySteamId, cached);
+                ShowSelfEditors(true);
+            }
+            else
+            {
+                // 缓存缺失: 界面里可能还是上一个玩家的内容, 必须先清空并上锁
+                ShowSelfEditors(false);
+                RenderSelfLoading();
+            }
 
             svc.RequestMyProfile(p =>
             {
-                if (p != null && _profileOpen && _profileSteamId == p.SteamId) RenderProfile(p.SteamId, p);
+                if (p != null && _profileOpen && _profileSteamId == p.SteamId)
+                {
+                    RenderProfile(p.SteamId, p);
+                    ShowSelfEditors(true);
+                }
             });
+        }
+
+        private void ShowSelfEditors(bool enabled)
+        {
+            UiKit.SetActive(_profileNickLabel, enabled);
+            UiKit.SetActive(_profileNickInput, enabled);
+            UiKit.SetActive(_profileNickSave, enabled);
+            UiKit.SetActive(_profileNickHint, enabled);
+            UiKit.SetActive(_profileBiomeLabel, enabled);
+            UiKit.SetActive(_profileBiomeDropdown, enabled);
+            if (enabled && _profileNickSave != null) _profileNickSave.interactable = !_profileNickBusy;
+        }
+
+        // 等待云端档案时的占位内容: 清掉上一位玩家的标题与统计
+        private void RenderSelfLoading()
+        {
+            if (_profileTitle != null) _profileTitle.text = CsrLoc.T("profile.window.title");
+            if (_profileMeta != null) _profileMeta.text = CsrLoc.T("cloud.loading");
+            if (_profileBody != null) _profileBody.text = "";
+            if (_profileModes != null) _profileModes.text = "";
+            if (_profileFav != null) _profileFav.text = "";
+            if (_profileNickInput != null && !_profileNickInput.isFocused) _profileNickInput.text = "";
         }
 
         private void OnSaveNicknameClicked()

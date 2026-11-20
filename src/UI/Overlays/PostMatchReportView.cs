@@ -68,9 +68,17 @@ namespace PeakCSR
             EventBus.OnEndScreenClosed -= OnEndScreenClosed;
         }
 
-        // 对局进入跑图阶段时不自动弹 (战报只在主菜单场景出现)
+        // 新一局开始 (或回到待机) 时, 上一局挂着未弹出的战报先清掉
         private void OnMatchStateChanged()
         {
+            MatchCoordinator mc = MatchCoordinator.Instance;
+            CsMatchState state = mc != null ? mc.State : CsMatchState.Idle;
+            if (state == CsMatchState.Idle
+                || state == CsMatchState.SearchingLobby
+                || state == CsMatchState.WaitingOpponent)
+            {
+                if (!_postOpen) ClearPendingPostMatch();
+            }
         }
 
         private void Update()
