@@ -28,6 +28,12 @@
 - `BepInEx-BepInExPack_PEAK`
 - `PeakCode-PEAK_RANKED`（PeakCSR 强依赖其原生 UI 和服务组件）
 
+## 第三方资源
+
+天梯榜与档案卡里的国旗位图来自 [Twemoji](https://github.com/twitter/twemoji)
+（图形部分 CC-BY 4.0）。完整署名、改动说明与未纳入条目见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 ---
 
 PeakCSR is an independent add-on mod and is not affiliated with or endorsed by ThomasAusHH (author of PEAK RANKED) or Landfall. All credit for the underlying Live Race infrastructure belongs to ThomasAusHH.
