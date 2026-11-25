@@ -1,3 +1,4 @@
+using PeakCSR.Practice;
 using RankedPeak.Ui.Native;
 using TMPro;
 using UnityEngine;
@@ -8,7 +9,7 @@ namespace PeakCSR
     // 左中分区: 实时队列人数与三赛制比例条 (原 BuildQueueBox + RefreshQueuePanel 收口)
     public sealed class LiveQueuePanel
     {
-        private const float BoxPad = 24f;
+        private const float BoxPad = MenuLayout.BoxPad;
         // 队列行三段式: 赛制名 | 人数文案 | 比例条, 给文案留足空间不再压条
         private const float QueueLabelW = 96f;
         private const float QueueCellX = QueueLabelW + 10f;
@@ -100,22 +101,22 @@ namespace PeakCSR
             {
                 if (_lblQueueTotal != null)
                 {
+                    // 三个数字全部是人数口径 (与面板里"共 N 人"保持一致)
                     _lblQueueTotal.text = CsrLoc.T("win.queue.total",
-                        q.OnlinePlayers, q.WaitingRooms, q.ActiveRooms);
+                        q.OnlinePlayers, q.WaitingPlayers, q.ActivePlayers);
                 }
             });
 
             UiKit.Safe(delegate
             {
-                if (_lblQueueMine != null)
-                {
-                    _lblQueueMine.text = queuing
-                        ? CsrLoc.T("win.queue.mine_queuing", mc.GetCurrentFormatDisplayName(),
-                            CsrFormat.FormatElapsed(mc.QueueElapsedSeconds))
-                        : CsrLoc.T("win.queue.mine_idle", mc.GetCurrentFormatDisplayName());
-                }
+                if (_lblQueueMine == null) return;
+                _lblQueueMine.text = queuing
+                    ? CsrLoc.T("win.queue.mine_queuing", mc.GetCurrentFormatDisplayName(),
+                        CsrFormat.FormatElapsed(mc.QueueElapsedSeconds))
+                    : CsrLoc.T("win.queue.mine_idle", mc.GetCurrentFormatDisplayName());
             });
 
+            // 三行赛制条的三个数字同为人数口径, 与汇总行严格一致
             UiKit.Safe(delegate
             {
                 if (_lblQueueStd != null)
