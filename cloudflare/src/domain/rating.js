@@ -30,11 +30,6 @@ export function getMinWinDelta(format, ascent, currentElo) {
   return Math.max(1, result);
 }
 
-// 与客户端 EloEngine.GetMaxLossDelta 严格一致
-export function getMaxLossDelta(format) {
-  return format === 2 ? rules.maxLossDelta.biomeSprint : rules.maxLossDelta.fullPeak;
-}
-
 export function getBaseKFactor(totalGames, currentElo) {
   if (totalGames < rules.placementMatches) return rules.kFactors.placement;
   if (currentElo >= rules.highEloFloor.threshold) return rules.kFactors.highElo;
