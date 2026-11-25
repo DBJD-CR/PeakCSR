@@ -85,10 +85,24 @@ New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 New-Item -ItemType Directory -Force -Path $DeployDir | Out-Null
 
 # 清理旧的组织名部署目录, 避免管理器里出现重复条目
+#
+# 注意: 绝不能 Remove-Item -Recurse 整个目录!
+# 只删"本 mod 的部署产物", 目录里其它文件一律保留。
+$DeployArtifacts = @("PeakCSR.dll", "manifest.json", "README.md", "icon.png")
 foreach ($dir in $LegacyDirs) {
     if (Test-Path $dir) {
-        Remove-Item -Path $dir -Recurse -Force
-        Write-Host "[PeakCSR] Removed legacy deploy dir: $dir" -ForegroundColor DarkYellow
+        foreach ($artifact in $DeployArtifacts) {
+            $file = Join-Path $dir $artifact
+            if (Test-Path $file) { Remove-Item -Path $file -Force }
+        }
+        # 目录彻底空了才删目录, 有残留数据 (存档等) 就留着并提示
+        if (-not (Get-ChildItem $dir -Force)) {
+            Remove-Item -Path $dir -Force
+            Write-Host "[PeakCSR] Removed empty legacy deploy dir: $dir" -ForegroundColor DarkYellow
+        }
+        else {
+            Write-Host "[PeakCSR] 旧目录仍有数据, 已保留: $dir" -ForegroundColor DarkYellow
+        }
     }
 }
 
