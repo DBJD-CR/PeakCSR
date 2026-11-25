@@ -17,6 +17,12 @@ namespace PeakCSR
         // 这是唯一可信的胜负依据: 游戏本体 stats.won 只代表"我到终点了",
         // 不代表"我是第一名", 双方先后点亮篝火时它两边都为 true。
         Peak,
+        // 我方阵亡宣告 (本局禁止复活时等同于判负)。
+        // 死亡者的角色会立刻退出房间, 心跳随之停止, 对端无法用
+        // "心跳是否新鲜"区分阵亡与掉线, 所以必须由死者主动宣告
+        Died,
+        // 存活探测: 开赛前双方每 2 秒互发一次
+        Ping,
         Unknown
     }
 
@@ -30,7 +36,7 @@ namespace PeakCSR
         public string PluginVersion;
         public bool HasRatedFlag;
         public bool RatedFlag;
-        public McsrRuleFormat Format;
+        public PcsrRuleFormat Format;
         // VOTE_REQ / VOTE_YES / REROLL_ROOM 载荷
         public int Seed;
         public int LevelIndex;
@@ -39,6 +45,10 @@ namespace PeakCSR
         // PEAK 载荷: 完赛用时 (毫秒), 双方用它做先后判定
         public bool HasPeakMs;
         public long PeakMs;
+        // DIED 载荷: 累计死亡次数
+        public int Deaths;
+        // 握手能力位: 对端是否支持 PING 存活探测 (旧客户端没有这一位)
+        public bool HasPingCap;
     }
 
     // __PCSR1V1| 协议编解码统一收口 (取代散落各处的字符串拼接与 Split('|') 分支链)
@@ -46,14 +56,25 @@ namespace PeakCSR
     {
         public const string PacketPrefix = "__PCSR1V1|";
 
-        public static string EncodeSyn(int elo, string version, McsrRuleFormat format, bool rated)
+        // 能力位: p = 支持 PING 存活探测
+        public const string CapPing = "p";
+
+        public static string EncodeSyn(int elo, string version, PcsrRuleFormat format, bool rated)
         {
-            return PacketPrefix + "SYN|" + elo + "|" + version + "|" + (int)format + "|" + (rated ? "1" : "0");
+            return PacketPrefix + "SYN|" + elo + "|" + version + "|" + (int)format + "|" + (rated ? "1" : "0")
+                + "|" + CapPing;
         }
 
-        public static string EncodeAck(int elo, string version, McsrRuleFormat format, bool rated)
+        public static string EncodeAck(int elo, string version, PcsrRuleFormat format, bool rated)
         {
-            return PacketPrefix + "ACK|" + elo + "|" + version + "|" + (int)format + "|" + (rated ? "1" : "0");
+            return PacketPrefix + "ACK|" + elo + "|" + version + "|" + (int)format + "|" + (rated ? "1" : "0")
+                + "|" + CapPing;
+        }
+
+        // 存活探测包: 无载荷, 只为刷新对端的"最近一次收到包"时间
+        public static string EncodePing()
+        {
+            return PacketPrefix + "PING";
         }
 
         public static string EncodeVoteReq(int seed, int levelIndex, int route)
@@ -83,6 +104,13 @@ namespace PeakCSR
             return PacketPrefix + "PEAK|" + elapsedMs;
         }
 
+        // 阵亡宣告: 只带累计死亡次数 (用于对端区分"真阵亡"与"超时 dnf")
+        public static string EncodeDied(int deaths)
+        {
+            if (deaths < 0) deaths = 0;
+            return PacketPrefix + "DIED|" + deaths;
+        }
+
         public static string EncodeVoid()
         {
             return PacketPrefix + "VOID";
@@ -98,7 +126,7 @@ namespace PeakCSR
         public static bool TryDecode(string body, out PcsrPacket packet)
         {
             packet = new PcsrPacket();
-            packet.Format = McsrRuleFormat.StandardAllPeak;
+            packet.Format = PcsrRuleFormat.StandardAllPeak;
             if (string.IsNullOrEmpty(body)) return false;
             if (!body.StartsWith(PacketPrefix, StringComparison.Ordinal)) return false;
 
@@ -148,6 +176,17 @@ namespace PeakCSR
                 }
                 return true;
             }
+            if (cmd == "DIED")
+            {
+                packet.Kind = PcsrPacketKind.Died;
+                if (parts.Length >= 3) packet.Deaths = ParseInt(parts[2]);
+                return true;
+            }
+            if (cmd == "PING")
+            {
+                packet.Kind = PcsrPacketKind.Ping;
+                return true;
+            }
             if (cmd == "VOID")
             {
                 packet.Kind = PcsrPacketKind.Void;
@@ -183,7 +222,12 @@ namespace PeakCSR
                 int fmtIdx = ParseInt(parts[4]);
                 if (fmtIdx < 0) fmtIdx = 0;
                 if (fmtIdx > 2) fmtIdx = 2;
-                packet.Format = (McsrRuleFormat)fmtIdx;
+                packet.Format = (PcsrRuleFormat)fmtIdx;
+            }
+            // 第 7 段是能力位 (旧对端没有这一段, 此时 HasPingCap 保持 false)
+            if (parts.Length >= 7 && !string.IsNullOrEmpty(parts[6]))
+            {
+                packet.HasPingCap = parts[6].IndexOf(CapPing[0]) >= 0;
             }
             return true;
         }
