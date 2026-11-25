@@ -25,10 +25,22 @@ namespace PeakCSR
                 }
                 if (__instance != null)
                 {
-                    // 结算画面关闭: 派发领域事件 (仍保留给其它订阅者)
                     EventBus.PublishEndScreenClosed();
-                    // PCSR 对局统一回主菜单, 不再回机场
                     MatchTeardownService.EnsureInitialized();
+
+                    // 关键: 本局若还没给出结论, 必须先结算再走人
+                    MatchCoordinator mc = MatchCoordinator.Instance;
+                    bool settledNow = mc != null && mc.TrySettlePendingBeforeExit();
+
+                    // 刚结算完并成功弹出战报: 留在结算场景让玩家先看结果,
+                    // 回主菜单由战报上的按钮负责
+                    if (settledNow && PostMatchReportView.Instance != null
+                        && PostMatchReportView.Instance.IsOpen)
+                    {
+                        return false;
+                    }
+
+                    // PCSR 对局统一回主菜单, 不回机场
                     MatchTeardownService.ReturnToMainMenu(false);
                     return false;
                 }
