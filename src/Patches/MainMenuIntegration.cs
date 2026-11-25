@@ -138,7 +138,13 @@ namespace PeakCSR
         }
 
         // 刷新木牌文案与段位图标, 并让木牌宽度自适应文字
+        // withIcon = false 时只更新计时文案 (每秒 tick 走这条, 避免反复查 sprite)
         internal static void RefreshSignLabel()
+        {
+            RefreshSignLabel(true);
+        }
+
+        internal static void RefreshSignLabel(bool withIcon)
         {
             Button btn = _signButton;
             if (btn == null) return;
@@ -149,8 +155,10 @@ namespace PeakCSR
             if (profile != null) elo = profile.CurrentElo;
             string tierKey = TierCatalog.GetVanillaTierKey(elo);
 
+            // 队列表态才显示"匹配中 (mm:ss)"; 其余一律回到 ELO 展示
+            bool queuing = mc != null && mc.State != CsMatchState.Idle && mc.State != CsMatchState.Finished;
             string label;
-            if (mc != null && mc.State != CsMatchState.Idle && mc.State != CsMatchState.Finished)
+            if (queuing)
             {
                 label = CsrLoc.T("sign.queuing", CsrFormat.FormatElapsed(mc.QueueElapsedSeconds));
             }
@@ -163,9 +171,15 @@ namespace PeakCSR
             TextMeshProUGUI text = btn.GetComponentInChildren<TextMeshProUGUI>(true);
             if (text != null)
             {
-                text.text = label;
-                FitSignWidth(btn, text);
+                // 文案没变就不重排
+                if (text.text != label)
+                {
+                    text.text = label;
+                    FitSignWidth(btn, text);
+                }
             }
+
+            if (!withIcon) return;
 
             Transform iconTr = (btn.transform.Find("Hinge") ?? btn.transform).Find("Icons/RankedIcon0");
             Image icon = iconTr != null ? iconTr.GetComponent<Image>() : null;
@@ -266,19 +280,65 @@ namespace PeakCSR
 
         private sealed class CsrSignUpdater : MonoBehaviour
         {
+            // 秒表刷新间隔: 0.25s 足够让"秒"跟手, 又不会每帧都算一次文案
+            private const float TickInterval = 0.25f;
+            private float _nextTick;
+            // 上一次实际显示的秒数; 只有秒数变了才重绘
+            private int _shownSeconds = -1;
+            private CsMatchState _shownState = CsMatchState.Idle;
+
             private void OnEnable()
             {
-                EventBus.OnRatingChanged += RefreshSignLabel;
-                EventBus.OnMatchStateChanged += RefreshSignLabel;
-                CsrLoc.OnLanguageChanged += RefreshSignLabel;
+                // 事件回调带参数的委托不能直接挂无参方法, 这里用 lambda 包一层
+                EventBus.OnRatingChanged += OnFullRefresh;
+                EventBus.OnMatchStateChanged += OnFullRefresh;
+                CsrLoc.OnLanguageChanged += OnFullRefresh;
+                ResetTick();
                 RefreshSignLabel();
             }
 
             private void OnDisable()
             {
-                EventBus.OnRatingChanged -= RefreshSignLabel;
-                EventBus.OnMatchStateChanged -= RefreshSignLabel;
-                CsrLoc.OnLanguageChanged -= RefreshSignLabel;
+                EventBus.OnRatingChanged -= OnFullRefresh;
+                EventBus.OnMatchStateChanged -= OnFullRefresh;
+                CsrLoc.OnLanguageChanged -= OnFullRefresh;
+            }
+
+            private void OnFullRefresh()
+            {
+                ResetTick();
+                RefreshSignLabel();
+            }
+
+            private void ResetTick()
+            {
+                _shownSeconds = -1;
+                _nextTick = 0f;
+            }
+
+            // 没有任何事件通知排队时长在走, 这里自己按节拍推进,
+            // 并且只在"秒数或状态真的变了"时才动 UI
+            private void Update()
+            {
+                if (_signButton == null) return;
+                if (Time.unscaledTime < _nextTick) return;
+                _nextTick = Time.unscaledTime + TickInterval;
+
+                MatchCoordinator mc = MatchCoordinator.Instance;
+                CsMatchState state = mc != null ? mc.State : CsMatchState.Idle;
+                if (state == CsMatchState.Idle || state == CsMatchState.Finished) return;
+                if (state != _shownState)
+                {
+                    _shownState = state;
+                    _shownSeconds = -1;
+                    RefreshSignLabel();
+                    return;
+                }
+
+                int seconds = Mathf.FloorToInt(mc.QueueElapsedSeconds);
+                if (seconds == _shownSeconds) return;
+                _shownSeconds = seconds;
+                RefreshSignLabel(false);
             }
         }
     }
