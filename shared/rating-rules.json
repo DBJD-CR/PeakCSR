@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "comment": "PCSR 1v1 评分与防刷分参数单一事实源: C# 客户端经 EmbeddedResource 读取, Cloudflare Worker 直接 import",
+  "elo": {
+    "scaleDenominator": 550.0,
+    "clampMin": 100,
+    "clampMax": 5000
+  },
+  "ascentMultipliers": [1.0, 1.06, 1.12, 1.18, 1.2, 1.35, 1.5, 1.6, 1.75],
+  "tenderfootMultiplier": 0.75,
+  "biomeSprintFactor": 0.22,
+  "placementMatches": 10,
+  "kFactors": {
+    "placement": 50,
+    "regular": 40,
+    "highElo": 32
+  },
+  "minWinDelta": {
+    "fullPeak": 8,
+    "biomeSprint": 2
+  },
+  "maxLossDelta": {
+    "fullPeak": -2,
+    "biomeSprint": -1
+  },
+  "highEloFloor": {
+    "threshold": 1650,
+    "winCap": 12
+  },
+  "progressCompensation": {
+    "sprintScale": 0.35,
+    "tenderfootScale": 0.75,
+    "leadBonus": { "placement": 6.0, "regular": 4.0 },
+    "completionRelief": { "placement": 12.0, "regular": 6.0 },
+    "completionStart": 0.30,
+    "completionSpan": 0.70,
+    "gapTerm": { "placement": 6.0, "regular": 3.5 },
+    "cap": { "placement": 14, "regular": 7 }
+  },
+  "antiBoost": {
+    "gapThreshold": 650,
+    "gapWeight": 0.5,
+    "windowMinutes": 30,
+    "maxRecentAgainstSameOpponent": 3,
+    "repeatWeight": 0.5
+  },
+  "seedElo": {
+    "min": 850,
+    "max": 1500,
+    "vanillaBase": 1000,
+    "vanillaWeight": 0.5
+  }
+}
