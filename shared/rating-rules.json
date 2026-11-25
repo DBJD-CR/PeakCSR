@@ -19,10 +19,6 @@
     "fullPeak": 8,
     "biomeSprint": 2
   },
-  "maxLossDelta": {
-    "fullPeak": -2,
-    "biomeSprint": -1
-  },
   "highEloFloor": {
     "threshold": 1650,
     "winCap": 12

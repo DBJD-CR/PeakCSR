@@ -28,12 +28,6 @@ namespace PeakCSR
             public int BiomeSprint;
         }
 
-        public sealed class LossCap
-        {
-            public int FullPeak;
-            public int BiomeSprint;
-        }
-
         public sealed class HighEloFloor
         {
             public int Threshold;
@@ -88,7 +82,6 @@ namespace PeakCSR
         public int PlacementMatches;
         [JsonProperty("kFactors")] public KFactors K;
         [JsonProperty("minWinDelta")] public WinFloor WinFloorSection;
-        [JsonProperty("maxLossDelta")] public LossCap LossCapSection;
         [JsonProperty("highEloFloor")] public HighEloFloor HighFloor;
         [JsonProperty("progressCompensation")] public ProgressCompensation Progress;
         [JsonProperty("antiBoost")] public AntiBoostSection AntiBoost;

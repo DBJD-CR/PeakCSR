@@ -41,10 +41,10 @@ namespace PeakCSR
 
         // 计算模式与天阶难度 ELO 倍率：菜鸟新人(A-1)为 0.75x，全山顶峰(A0)为基准 1.00x，
         // 天阶 1~8 递增，单群系冲刺乘 0.22x
-        public static double GetModeMultiplier(McsrRuleFormat format, int ascent)
+        public static double GetModeMultiplier(PcsrRuleFormat format, int ascent)
         {
             double ascentMult = GetAscentMultiplier(ascent);
-            if (format == McsrRuleFormat.BiomeSprint)
+            if (format == PcsrRuleFormat.BiomeSprint)
             {
                 // 与 Worker 的 Math.round(x*100)/100 同口径: .xx5 一律进位
                 return Math.Round(R.BiomeSprintFactor * ascentMult, 2, MidpointRounding.AwayFromZero);
@@ -57,12 +57,12 @@ namespace PeakCSR
         //   全山:  A-1 → +6,  A0 → +8,  A2 → +9,  A5 → +11, A8 → +14
         //   单群系: A-1 → +1,  A0 → +2,  A6 → +3,  A8 → +3
         // 1650+ 高端分段先把保底钳制到 12, 避免顶端出现刷分情况
-        public static int GetMinWinDelta(McsrRuleFormat format, int ascent, int currentElo)
+        public static int GetMinWinDelta(PcsrRuleFormat format, int ascent, int currentElo)
         {
             double ascentMult = GetAscentMultiplier(ascent);
-            int baseMin = format == McsrRuleFormat.BiomeSprint ? R.WinFloorSection.BiomeSprint : R.WinFloorSection.FullPeak;
+            int baseMin = format == PcsrRuleFormat.BiomeSprint ? R.WinFloorSection.BiomeSprint : R.WinFloorSection.FullPeak;
             double scaled = baseMin * ascentMult;
-            int result = format == McsrRuleFormat.BiomeSprint
+            int result = format == PcsrRuleFormat.BiomeSprint
                 ? (int)Math.Floor(scaled)
                 : (int)Math.Round(scaled, MidpointRounding.AwayFromZero);
             if (currentElo >= R.HighFloor.Threshold)
@@ -71,12 +71,6 @@ namespace PeakCSR
             }
             if (result < 1) result = 1;
             return result;
-        }
-
-        // 落败扣分上限 (负数): 单群系最多 -1, 其余最多 -2
-        public static int GetMaxLossDelta(McsrRuleFormat format)
-        {
-            return format == McsrRuleFormat.BiomeSprint ? R.LossCapSection.BiomeSprint : R.LossCapSection.FullPeak;
         }
 
         public static int GetBaseKFactor(int totalGames, int currentElo)
@@ -101,7 +95,7 @@ namespace PeakCSR
             double actualScore,
             float selfProgress01,
             float oppProgress01,
-            McsrRuleFormat format,
+            PcsrRuleFormat format,
             int ascent,
             bool isPlacement,
             double antiBoostWeight)
@@ -113,7 +107,7 @@ namespace PeakCSR
             float diff = myP - oppP;
 
             RatingRules.ProgressCompensation pc = R.Progress;
-            double scale = format == McsrRuleFormat.BiomeSprint ? pc.SprintScale : 1.0;
+            double scale = format == PcsrRuleFormat.BiomeSprint ? pc.SprintScale : 1.0;
             if (ascent < 0) scale *= pc.TenderfootScale;
 
             double bonus = 0.0;
@@ -146,9 +140,11 @@ namespace PeakCSR
 
         // 计算最终 ELO 变动
         //   weightFactor    : antiBoostWeight * modeMultiplier, 只作用于基础分 (不污染保底)
-        //   antiBoostWeight : 仅用于判断是否应当施加保底/上限 (练习赛、自建小号、防刷分时不施加)
-        //   minWinDelta     : GetMinWinDelta 预先算好的绝对保底下限
-        //   maxLossDelta    : GetMaxLossDelta 预先算好的绝对扣分上限 (负数)
+        //   antiBoostWeight : 仅用于判断是否应当施加保底 (练习模式、自建小号、防刷分时不施加)
+        //   minWinDelta     : GetMinWinDelta 预先算好的绝对保底下限 (只对胜方生效)
+        //
+        // 败方不做任何扣分兜底: 公式算出多少就扣多少。
+        // 唯一保留的败方守卫生效于"因分差过大反而算出加分"这种荒谬情况, 见 rawBase >= 0 分支。
         public static int ComputeDelta(
             int myElo,
             int opponentElo,
@@ -157,7 +153,6 @@ namespace PeakCSR
             double weightFactor,
             double antiBoostWeight,
             int minWinDelta,
-            int maxLossDelta,
             int progressBonus,
             out int baseDeltaOut)
         {
@@ -173,6 +168,7 @@ namespace PeakCSR
                 }
                 else if (actualScore < 0.25 && rawBase >= 0)
                 {
+                    // 输了却算出加分: 钳成 -1。这不是"扣分兜底", 只是禁止败方加分
                     rawBase = -1;
                 }
             }
@@ -180,19 +176,15 @@ namespace PeakCSR
             baseDeltaOut = rawBase;
             int total = rawBase + progressBonus;
 
-            if (antiBoostWeight > 0.01)
+            // 保底只给胜方, 且是绝对下限: 进度补偿为负也不能低于它
+            if (antiBoostWeight > 0.01 && actualScore > 0.75 && total < minWinDelta)
             {
-                if (actualScore > 0.75)
-                {
-                    // 保底是绝对下限: 进度补偿为负也不能低于它
-                    if (total < minWinDelta) total = minWinDelta;
-                }
-                else if (actualScore < 0.25)
-                {
-                    // 扣分上限是绝对上限: 无论基础分多低都不能超过它 (即不能扣得比上限更多)
-                    int capped = Math.Max(maxLossDelta, Math.Min(0, total));
-                    total = capped;
-                }
+                total = minWinDelta;
+            }
+            else if (antiBoostWeight > 0.01 && actualScore < 0.25 && total > 0)
+            {
+                // 败方不得因进度补偿而净加分 (这不是扣分兜底, 只是禁止输着加分)
+                total = 0;
             }
 
             return total;
