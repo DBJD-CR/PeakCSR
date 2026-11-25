@@ -1,10 +1,10 @@
 // D1 players 表操作封装与表驱动列映射 (取代 worker.js 里的 if(format) 分支树)
 
 export const PLAYER_COLUMNS = [
-  "steam_id", "player_name", "nickname", "elo", "peak_elo", "wins", "losses", "draws", "streak",
+  "steam_id", "player_name", "nickname", "elo", "peak_elo", "wins", "losses", "draws", "streak", "best_streak",
   "wins_all_peak", "losses_all_peak", "wins_hardcore", "losses_hardcore", "wins_sprint", "losses_sprint",
   "games_all_peak", "games_hardcore", "games_sprint",
-  "favorite_map", "favorite_ascent", "favorite_format"
+  "favorite_map", "disliked_map", "favorite_ascent", "favorite_format", "country"
 ].join(", ");
 
 // 分赛制战绩列的表驱动映射 (format: 0=全山 1=高难 2=单群系)
@@ -42,11 +42,11 @@ export async function getOrCreatePlayer(db, steamId, playerName, seedElo = 1000)
     const now = Date.now();
     await db.prepare(
       `INSERT OR IGNORE INTO players
-       (steam_id, player_name, elo, peak_elo, wins, losses, draws, streak,
+       (steam_id, player_name, elo, peak_elo, wins, losses, draws, streak, best_streak,
         wins_all_peak, losses_all_peak, wins_hardcore, losses_hardcore, wins_sprint, losses_sprint,
         games_all_peak, games_hardcore, games_sprint,
-        favorite_map, favorite_ascent, favorite_format, updated_at)
-       VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -999, -1, ?)`
+        favorite_map, disliked_map, favorite_ascent, favorite_format, country, updated_at)
+       VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -999, -1, '', ?)`
     ).bind(steamId, playerName || "Player", initElo, initElo, now).run();
     row = await db.prepare("SELECT * FROM players WHERE steam_id = ?").bind(steamId).first();
   }

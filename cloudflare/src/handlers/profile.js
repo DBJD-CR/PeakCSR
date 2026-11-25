@@ -2,6 +2,7 @@
 import { jsonResp, parseMaybeInt } from "../lib/http.js";
 import { sha256Hex16, SHARED_SALT } from "../lib/crypto.js";
 import { sanitizeNickname, NICK_COOLDOWN_MS } from "../domain/nickname.js";
+import { derivePreferences, normalizeCountry } from "../domain/preferences.js";
 import { PLAYER_COLUMNS, getOrCreatePlayer } from "../db/players.js";
 import { clampSeedElo } from "../domain/rating.js";
 
@@ -21,12 +22,26 @@ export async function handleProfile(url, env) {
     rank = (higher && higher.c ? higher.c : 0) + 1;
   }
 
+  // 最常玩难度/模式以 settled_matches 现场推导为准
+  const derived = row ? await derivePreferences(env.DB, steamId) : null;
+  const profile = row ? withDerivedPreferences(row, derived) : null;
+
   return jsonResp({
     ok: true,
     refreshedAt: Date.now(),
-    profile: row || null,
+    profile,
     rank
   }, 200);
+}
+
+// 用推导值覆盖 favorite_ascent / favorite_format, 推导不出来时保留原列
+function withDerivedPreferences(row, derived) {
+  if (!row || !derived) return row;
+  const merged = Object.assign({}, row);
+  if (derived.favoriteAscent > -900) merged.favorite_ascent = derived.favoriteAscent;
+  if (derived.favoriteFormat >= 0) merged.favorite_format = derived.favoriteFormat;
+  merged.settled_games = derived.settledGames;
+  return merged;
 }
 
 // 玩家自选档案 (昵称 / 最爱地图 / 最爱难度 / 最爱模式)
@@ -37,11 +52,17 @@ export async function handleProfileUpdate(body, env) {
   const signature = String(body.signature || "").trim().toLowerCase();
   if (!steamId) return jsonResp({ ok: false, error: "Missing steamId" }, 400);
 
-  // favoriteMap 现在是群系索引 0~10, 超出范围一律归 -1 (未设置)
+  // favoriteMap / dislikedMap 都是群系索引 0~10, 超出范围一律归 -1 (未设置)
   const favoriteMapRaw = parseMaybeInt(body.favoriteMap, -1);
   const favoriteMap = (favoriteMapRaw >= 0 && favoriteMapRaw <= 10) ? favoriteMapRaw : -1;
+  const dislikedMapRaw = parseMaybeInt(body.dislikedMap, -1);
+  let dislikedMap = (dislikedMapRaw >= 0 && dislikedMapRaw <= 10) ? dislikedMapRaw : -1;
+  // 最爱与最讨厌不允许是同一个群系
+  if (dislikedMap >= 0 && dislikedMap === favoriteMap) dislikedMap = -1;
   const favoriteAscent = parseMaybeInt(body.favoriteAscent, -999);
   const favoriteFormat = parseMaybeInt(body.favoriteFormat, -1);
+  // 国籍: 两位大写字母, 走主权归一
+  const country = normalizeCountry(body.country);
 
   // 昵称走白名单过滤, 空串表示"沿用 Steam 昵称"
   const nickname = sanitizeNickname(body.nickname);
@@ -49,17 +70,35 @@ export async function handleProfileUpdate(body, env) {
   const keepNickname = body.keepNickname === true || body.keepNickname === 1 || body.keepNickname === "1";
 
   // 签名顺序必须与 src/Ladder/CloudLadderClient.cs 的 PushProfile 完全一致
-  const rawSigStr = `${steamId}|${favoriteMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${keepNickname ? 1 : 0}|${SHARED_SALT}`;
-  const expectedSig = await sha256Hex16(rawSigStr);
+  // 四轨并存, 从新到旧依次尝试:
+  //   含 country 的最新版 > 含 dislikedMap 不含 country > 不含 dislikedMap > 最早版本
+  // 老客户端不会传 country, 落到旧轨时本次不改动该列, 保留云端现值
+  const sigStr = `${steamId}|${favoriteMap}|${dislikedMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${keepNickname ? 1 : 0}|${country}|${SHARED_SALT}`;
+  const expectedSig = await sha256Hex16(sigStr);
+  const noCountrySigStr = `${steamId}|${favoriteMap}|${dislikedMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${keepNickname ? 1 : 0}|${SHARED_SALT}`;
+  const noCountrySig = await sha256Hex16(noCountrySigStr);
+  const midSigStr = `${steamId}|${favoriteMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${keepNickname ? 1 : 0}|${SHARED_SALT}`;
+  const midSig = await sha256Hex16(midSigStr);
   const legacySigStr = `${steamId}|${favoriteMap}|${favoriteAscent}|${favoriteFormat}|${nickname}|${SHARED_SALT}`;
   const legacySig = await sha256Hex16(legacySigStr);
 
+  // legacyClient: 客户端没带 dislikedMap, 本次不写该列
+  // legacyCountry: 客户端没带 country, 本次不写该列
   let legacyClient = false;
+  let legacyCountry = false;
   if (signature !== expectedSig) {
-    if (signature !== legacySig) {
+    if (signature === noCountrySig) {
+      legacyCountry = true;
+    } else if (signature === midSig) {
+      // 旧客户端不带 dislikedMap, 也不带 country
+      legacyClient = true;
+      legacyCountry = true;
+    } else if (signature === legacySig) {
+      legacyClient = true;
+      legacyCountry = true;
+    } else {
       return jsonResp({ ok: false, error: "Signature verification failed" }, 403);
     }
-    legacyClient = true;
   }
   const effectiveKeepNickname = keepNickname || (legacyClient && nickname === "");
 
@@ -77,6 +116,16 @@ export async function handleProfileUpdate(body, env) {
 
   updates.push("favorite_map = ?", "favorite_ascent = ?", "favorite_format = ?");
   binds.push(favoriteMap, favoriteAscent, favoriteFormat);
+  // 旧客户端不传 dislikedMap: 不写该列, 免得把玩家已选的偏好抹成 -1
+  if (!legacyClient) {
+    updates.push("disliked_map = ?");
+    binds.push(dislikedMap);
+  }
+  // 同理国籍: 老客户端不带该字段时保留云端现值
+  if (!legacyCountry) {
+    updates.push("country = ?");
+    binds.push(country);
+  }
 
   const currentNick = player.nickname || "";
   // 昵称等价性按大小写不敏感判定: 只改大小写不算改名, 不消耗冷却也不必回写
