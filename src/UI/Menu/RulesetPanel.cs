@@ -1,3 +1,4 @@
+using PeakCSR.Practice;
 using RankedPeak.Ui.Native;
 using TMPro;
 using UnityEngine;
@@ -9,7 +10,7 @@ namespace PeakCSR
     // 左上分区: 赛制、天阶难度、计分开关、房间码加入/建房 (原 PcsrMenuWindow.BuildRulesBox + 交互收口)
     public sealed class RulesetPanel
     {
-        private const float BoxPad = 24f;
+        private const float BoxPad = MenuLayout.BoxPad;
 
         private readonly PcsrMenuWindow _host;
         public readonly RectTransform Box;
@@ -22,6 +23,7 @@ namespace PeakCSR
         private TextMeshProUGUI _lblAscent;
         private TextMeshProUGUI _lblMultiplier;
         private Button _btnRated;
+        private Button _btnPractice;
         private TMP_InputField _inputInvite;
 
         public RulesetPanel(PcsrMenuWindow host, RectTransform body, float x, float y, float w, float h)
@@ -61,7 +63,9 @@ namespace PeakCSR
             _btnAscentPlus.onClick.AddListener(new UnityAction(OnAscentPlus));
             _lblMultiplier = UiKit.CreateText(Box, "LblMult", "", 18f, PeakWindowStyle.TextMuted, BoxPad + 252f, 172f, inner - 252f, 40f);
 
-            _btnRated = PeakWindowStyle.CreatePill(Box, "BtnRated", CsrLoc.T("hud.invite.rated"), BoxPad, 228f, 240f, 40f, 18f);
+            // 计分开关: 与"开始练习"同一行左右并排, 后者只在非计分模式下出现
+            float ratedW = 240f;
+            _btnRated = PeakWindowStyle.CreatePill(Box, "BtnRated", CsrLoc.T("hud.invite.rated"), BoxPad, 228f, ratedW, 40f, 18f);
             _btnRated.onClick.AddListener(new UnityAction(OnRatedToggled));
             LocalizedTextBinder.BindPill(_btnRated, "hud.invite.rated");
 
@@ -81,25 +85,32 @@ namespace PeakCSR
             hostBtn.onClick.AddListener(new UnityAction(OnHostClicked));
             LocalizedTextBinder.BindPill(join, "hud.invite.join");
             LocalizedTextBinder.BindPill(hostBtn, "hud.invite.host");
+
+            // 练习开关: 紧贴计分开关右侧, 仅在"练习模式(不计分)"下显示
+            float practiceX = BoxPad + ratedW + 12f;
+            _btnPractice = PeakWindowStyle.CreatePill(Box, "BtnPractice", CsrLoc.T("practice.btn.start"),
+                practiceX, 228f, inner - ratedW - 12f, 40f, 18f);
+            _btnPractice.onClick.AddListener(new UnityAction(OnPracticeClicked));
+            RefreshPracticeButton();
         }
 
         private static MatchCoordinator Mc { get { return MatchCoordinator.Instance; } }
 
         private void OnStandardClicked()
         {
-            if (Mc != null) Mc.SelectedFormat = McsrRuleFormat.StandardAllPeak;
+            if (Mc != null) Mc.SelectedFormat = PcsrRuleFormat.StandardAllPeak;
             _host.RefreshAll();
         }
 
         private void OnHardcoreClicked()
         {
-            if (Mc != null) Mc.SelectedFormat = McsrRuleFormat.HardcoreAscent4;
+            if (Mc != null) Mc.SelectedFormat = PcsrRuleFormat.HardcoreAscent4;
             _host.RefreshAll();
         }
 
         private void OnSprintClicked()
         {
-            if (Mc != null) Mc.SelectedFormat = McsrRuleFormat.BiomeSprint;
+            if (Mc != null) Mc.SelectedFormat = PcsrRuleFormat.BiomeSprint;
             _host.RefreshAll();
         }
 
@@ -136,12 +147,31 @@ namespace PeakCSR
             _host.RefreshDynamic();
         }
 
+        // 练习开关: 未练习时用当前赛制/天阶开一局离线单人, 练习中则结束
+        private void OnPracticeClicked()
+        {
+            PracticeCoordinator pc = PracticeCoordinator.Instance;
+            if (pc == null || Mc == null) return;
+
+            if (pc.IsActive)
+            {
+                pc.StopPractice();
+            }
+            else
+            {
+                // 排位对局进行中不允许开练习: 1v1 只能存在一个对局
+                if (Mc.State != CsMatchState.Idle && Mc.State != CsMatchState.Finished) return;
+                pc.StartPractice(Mc.SelectedFormat, Mc.SelectedAscent);
+            }
+            _host.RefreshDynamic();
+        }
+
         public void RefreshSelection()
         {
             if (Mc == null) return;
-            PeakWindowStyle.SetPillSelected(_btnStandard, Mc.SelectedFormat == McsrRuleFormat.StandardAllPeak);
-            PeakWindowStyle.SetPillSelected(_btnHardcore, Mc.SelectedFormat == McsrRuleFormat.HardcoreAscent4);
-            PeakWindowStyle.SetPillSelected(_btnSprint, Mc.SelectedFormat == McsrRuleFormat.BiomeSprint);
+            PeakWindowStyle.SetPillSelected(_btnStandard, Mc.SelectedFormat == PcsrRuleFormat.StandardAllPeak);
+            PeakWindowStyle.SetPillSelected(_btnHardcore, Mc.SelectedFormat == PcsrRuleFormat.HardcoreAscent4);
+            PeakWindowStyle.SetPillSelected(_btnSprint, Mc.SelectedFormat == PcsrRuleFormat.BiomeSprint);
             PeakWindowStyle.SetPillSelected(_btnRated, Mc.IsRatedMatch);
 
             bool idle = Mc.State == CsMatchState.Idle;
@@ -162,6 +192,38 @@ namespace PeakCSR
 
             PeakWindowStyle.SetPillText(_btnRated,
                 Mc.IsRatedMatch ? ("● " + CsrLoc.T("hud.invite.rated")) : ("○ " + CsrLoc.T("hud.invite.unrated")));
+
+            RefreshPracticeButton();
+        }
+
+        // 练习按钮: 仅在"练习模式(不计分)"下出现, 文案与可用性随状态切换
+        // 练习进行中必须保留可见, 否则把计分开关切回去就没有停止入口了
+        public void RefreshPracticeButton()
+        {
+            if (_btnPractice == null) return;
+
+            PracticeCoordinator pc = PracticeCoordinator.Instance;
+            bool practicing = pc != null && pc.IsActive;
+            bool visible = practicing || (Mc != null && !Mc.IsRatedMatch);
+            UiKit.SetActive(_btnPractice, visible);
+
+            PeakWindowStyle.SetPillText(_btnPractice,
+                CsrLoc.T(practicing ? "practice.btn.stop" : "practice.btn.start"));
+
+            if (practicing)
+            {
+                // 切换阶段不再允许点击, 避免与交棒流程打架
+                _btnPractice.interactable = pc.Phase != PracticePhase.Switching;
+                PeakWindowStyle.SetPillSelected(_btnPractice, true);
+                return;
+            }
+
+            // 排位对局进行中不允许开练习
+            bool matchBusy = Mc != null
+                && Mc.State != CsMatchState.Idle
+                && Mc.State != CsMatchState.Finished;
+            _btnPractice.interactable = !matchBusy;
+            PeakWindowStyle.SetPillSelected(_btnPractice, false);
         }
     }
 }
