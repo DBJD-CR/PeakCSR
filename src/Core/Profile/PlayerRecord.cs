@@ -15,13 +15,35 @@ namespace PeakCSR
         public int Losses;
         public int Draws;
         public int Streak;
+        // 历史最长连胜 (纯增量统计, 云端回灌不会抹掉它)
+        public int BestStreak;
 
         // 分赛制战绩 (只统计计分赛): 0=全山 1=高难 2=单群系
         public ModeRecord[] Modes = new ModeRecord[3];
 
         // 玩家自选 / 自动推导的偏好
-        // FavoriteMap 存群系索引 (见 PcsrBiomes), -1 表示未设置
-        public int FavoriteMap = -1;
+        // 群系索引与互斥规则统一收进 PlayerPreferences
+        private readonly PlayerPreferences _prefs = new PlayerPreferences();
+
+        public int FavoriteMap
+        {
+            get { return _prefs.FavoriteBiome; }
+            set { _prefs.FavoriteBiome = value; }
+        }
+
+        public int DislikedMap
+        {
+            get { return _prefs.DislikedBiome; }
+            set { _prefs.DislikedBiome = value; }
+        }
+
+        // 国籍: 只持有归一后的代码
+        public string Country
+        {
+            get { return _prefs.Country; }
+            set { _prefs.SetCountry(value); }
+        }
+
         public int FavoriteAscent = -999;
         public int FavoriteFormat = -1;
 
@@ -42,7 +64,7 @@ namespace PeakCSR
             }
         }
 
-        private static int ModeIndex(McsrRuleFormat format)
+        private static int ModeIndex(PcsrRuleFormat format)
         {
             int idx = (int)format;
             if (idx < 0) idx = 0;
@@ -50,11 +72,11 @@ namespace PeakCSR
             return idx;
         }
 
-        public int ModeWins(McsrRuleFormat format) { return Modes[ModeIndex(format)].Wins; }
-        public int ModeLosses(McsrRuleFormat format) { return Modes[ModeIndex(format)].Losses; }
-        public int ModeGames(McsrRuleFormat format) { return Modes[ModeIndex(format)].Games; }
+        public int ModeWins(PcsrRuleFormat format) { return Modes[ModeIndex(format)].Wins; }
+        public int ModeLosses(PcsrRuleFormat format) { return Modes[ModeIndex(format)].Losses; }
+        public int ModeGames(PcsrRuleFormat format) { return Modes[ModeIndex(format)].Games; }
 
-        public int ModeWinRatePercent(McsrRuleFormat format)
+        public int ModeWinRatePercent(PcsrRuleFormat format)
         {
             ModeRecord m = Modes[ModeIndex(format)];
             int t = m.Wins + m.Losses;
@@ -102,15 +124,29 @@ namespace PeakCSR
             }
         }
 
+        // 保存玩家自选的"最爱群系" (见 PcsrBiomes.All), -1 表示未设置
+        // 与最讨厌相同则清掉最讨厌, 避免自相矛盾
         public void SetFavoriteMap(int biomeIndex, int biomeCount)
         {
-            if (biomeIndex < -1) biomeIndex = -1;
             if (biomeIndex > biomeCount - 1) biomeIndex = biomeCount - 1;
-            FavoriteMap = biomeIndex;
+            _prefs.SetFavorite(biomeIndex);
+        }
+
+        // 保存玩家自选的"最讨厌群系", 返回 false 表示与最爱冲突被拒
+        public bool SetDislikedMap(int biomeIndex, int biomeCount)
+        {
+            if (biomeIndex > biomeCount - 1) biomeIndex = biomeCount - 1;
+            return _prefs.SetDisliked(biomeIndex);
+        }
+
+        // 越界与自相矛盾的偏好按未设置处理 (落盘/回灌后统一收敛)
+        public void NormalizePreferences()
+        {
+            _prefs.Normalize();
         }
 
         // 计分赛结果落账 (含胜负/连胜/分赛制/偏好统计, 与旧 BumpModeStat 系列行为一致)
-        public void ApplyRatedResult(McsrRuleFormat format, int ascent, double actualScore, int delta)
+        public void ApplyRatedResult(PcsrRuleFormat format, int ascent, double actualScore, int delta)
         {
             Elo += delta;
             if (Elo < EloEngine.EloClampMin) Elo = EloEngine.EloClampMin;
@@ -121,6 +157,7 @@ namespace PeakCSR
             {
                 Wins++;
                 Streak = Streak >= 0 ? Streak + 1 : 1;
+                if (Streak > BestStreak) BestStreak = Streak;
                 BumpModeStat(format, true);
             }
             else if (actualScore < 0.25)
@@ -139,7 +176,7 @@ namespace PeakCSR
             BumpPreferenceStats(format, ascent);
         }
 
-        // 练习赛: 分数变动但不计入胜负与分赛制战绩
+        // 练习模式: 分数变动但不计入胜负与分赛制战绩
         public void ApplyUnratedResult(int delta)
         {
             Elo += delta;
@@ -148,7 +185,7 @@ namespace PeakCSR
             if (Elo > PeakElo) PeakElo = Elo;
         }
 
-        private void BumpModeStat(McsrRuleFormat format, bool won)
+        private void BumpModeStat(PcsrRuleFormat format, bool won)
         {
             ModeRecord m = Modes[ModeIndex(format)];
             if (won) m.Wins++; else m.Losses++;
@@ -156,7 +193,7 @@ namespace PeakCSR
             Modes[ModeIndex(format)] = m;
         }
 
-        private void BumpModeGameOnly(McsrRuleFormat format)
+        private void BumpModeGameOnly(PcsrRuleFormat format)
         {
             ModeRecord m = Modes[ModeIndex(format)];
             m.Games++;
@@ -164,7 +201,7 @@ namespace PeakCSR
         }
 
         // 每打完一局计一次, 用于推导"最常玩难度"和"最常玩模式"
-        private void BumpPreferenceStats(McsrRuleFormat format, int ascent)
+        private void BumpPreferenceStats(PcsrRuleFormat format, int ascent)
         {
             int ascentIdx = RoomMagicCodec.ClampAscent(ascent) + 1;
             if (ascentIdx >= 0 && ascentIdx < AscentGames.Length)
@@ -206,8 +243,8 @@ namespace PeakCSR
             int winsAllPeak, int lossesAllPeak,
             int winsHardcore, int lossesHardcore,
             int winsSprint, int lossesSprint,
-            int favoriteMap, int favoriteAscent, int favoriteFormat,
-            int biomeCount)
+            int favoriteMap, int dislikedMap, int favoriteAscent, int favoriteFormat,
+            int biomeCount, string country)
         {
             // 分数不可信时整份档案都不采纳
             if (!IsPlausibleCloudElo(elo))
@@ -234,6 +271,16 @@ namespace PeakCSR
             if (favoriteMap >= 0 && favoriteMap < biomeCount) FavoriteMap = favoriteMap;
             if (favoriteAscent > -900) FavoriteAscent = favoriteAscent;
             if (favoriteFormat >= 0) FavoriteFormat = favoriteFormat;
+            // 云端没给 dislikedMap (旧客户端/新列未写入) 时传 -1, 此时保留本地现值
+            if (dislikedMap != -1 && dislikedMap >= 0 && dislikedMap < biomeCount && dislikedMap != FavoriteMap)
+            {
+                DislikedMap = dislikedMap;
+            }
+            // 云端没给 country 时传 null/空, 保留本地现值;
+            // 归一口径与本地一致, 非主权代码不会落盘
+            string normalizedCountry = PcsrCountries.Normalize(country);
+            if (!string.IsNullOrEmpty(normalizedCountry)) Country = normalizedCountry;
+            NormalizePreferences();
             return true;
         }
 
@@ -248,10 +295,11 @@ namespace PeakCSR
             Losses = 0;
             Draws = 0;
             Streak = 0;
+            BestStreak = 0;
             Modes[0] = new ModeRecord();
             Modes[1] = new ModeRecord();
             Modes[2] = new ModeRecord();
-            FavoriteMap = -1;
+            _prefs.Reset();
             FavoriteAscent = -999;
             FavoriteFormat = -1;
             Array.Clear(AscentGames, 0, AscentGames.Length);
