@@ -1,5 +1,7 @@
+using System;
 using BepInEx;
 using BepInEx.Logging;
+using PeakCSR.Practice;
 using UnityEngine;
 
 namespace PeakCSR
@@ -57,14 +59,21 @@ namespace PeakCSR
                     string diff = MatchNaming.GetAscentDisplayName(ascent);
                     switch (format)
                     {
-                        case McsrRuleFormat.HardcoreAscent4:
+                        case PcsrRuleFormat.HardcoreAscent4:
                             return CsrLoc.T("format.hardcore.full", diff);
-                        case McsrRuleFormat.BiomeSprint:
+                        case PcsrRuleFormat.BiomeSprint:
                             return CsrLoc.T("format.sprint.full", diff);
                         default:
                             return CsrLoc.T("format.standard.full", diff);
                     }
                 });
+
+            // PB 台账与本地战报归档: 都只依赖本地文件, 尽早初始化,
+            // 这样第一局结算前台账已经就绪 (采集发生在结算时)
+            PersonalBestService.Initialize();
+            LocalReportArchive.Initialize();
+            // 历史缺口一次性修补: 返回本次刷新的条数, 供稍后决定是否补传云端
+            int rescanRefreshed = RunOneTimePbRescan();
 
             // 本地档案: Newtonsoft + 签名 + 旧版平铺存档自动迁移 (护栏 3)
             LocalProfileStore store = new LocalProfileStore();
@@ -86,8 +95,17 @@ namespace PeakCSR
             // 结算上报通道: 协调器必须持有天梯服务引用, 否则战报永远不会提交
             _coordinator.Ladder = ladder;
 
+            // 重扫出来的 PB 必须尽早推上云端
+            if (rescanRefreshed > 0) ladder.SyncPendingPbs();
+
             // 收尾服务: 回主菜单的唯一实现, 战报按钮与 30s 关房都走它
             MatchTeardownService.Initialize();
+
+            // 练习模式: 离线单人爬图 + 后台匹配探针, 命中后交棒给排位协调器
+            PracticeCoordinator practice = go.AddComponent<PracticeCoordinator>();
+            practice.Initialize(_coordinator.Gateway, _coordinator);
+            // 游戏内练习 HUD: 显示爬图用时 + 已匹配用时
+            PracticeHud.Ensure();
 
             // UI 宿主 (旧 IMGUI PeakCsrHud 已删除, F10 热键统一在本组件 Update 处理)
             go.AddComponent<PcsrMenuWindow>();
@@ -116,6 +134,11 @@ namespace PeakCSR
                 _coordinator.TickActiveSession();
             }
 
+            // Photon 加固参数晚于 Photon 自身初始化, 这里做一次幂等补挂
+            PhotonResilience.ApplyTransportTuning();
+            // 加载遮罩卡死监控: Photon 掉线会让原版载图协程永久挂起
+            PhotonResilience.TickLoadingScreenWatchdog();
+
             // F10 开关排位中心 (迁移自旧 PeakCsrHud 的热键; 现在是真正的开/关切换)
             if (ToggleMenuKey != null && Input.GetKeyDown(ToggleMenuKey.Value))
             {
@@ -138,6 +161,32 @@ namespace PeakCSR
                 {
                     LogTailWindow.OpenDefault();
                 }
+            }
+        }
+
+        // 历史 PB 重扫只做一次, 用标记文件守住
+        private static int RunOneTimePbRescan()
+        {
+            const string flagFile = "pb_rescan_v3.done";
+            try
+            {
+                string flagPath = PcsrDataPaths.Resolve(flagFile);
+                if (System.IO.File.Exists(flagPath)) return 0;
+
+                PersonalBestService pb = PersonalBestService.Instance;
+                if (pb == null) return 0;
+                int refreshed = pb.RescanArchive();
+                PcsrLog.LogInfo("[PeakCSR] 历史 PB 重扫: 刷新 " + refreshed + " 条。");
+
+                string savePath = PcsrDataPaths.PrepareSave(flagFile);
+                System.IO.File.WriteAllText(savePath,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString());
+                return refreshed;
+            }
+            catch (System.Exception ex)
+            {
+                PcsrLog.LogWarning("[PeakCSR] 历史 PB 重扫失败 (不影响启动): " + ex.Message);
+                return 0;
             }
         }
 
@@ -186,6 +235,8 @@ namespace PeakCSR
         private void OnDestroy()
         {
             LogTailWindow.Close();
+            // 国旗 Sprite/Texture2D 是静态缓存, 不随 UI 树销毁, 这里显式释放
+            FlagSprites.Clear();
             if (_coordinator != null)
             {
                 _coordinator.Dispose();
