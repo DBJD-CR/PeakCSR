@@ -56,7 +56,7 @@ namespace PeakCSR
             System.Random rng = new System.Random(System.Guid.NewGuid().GetHashCode());
             session.ProposedSeed = rng.Next(100000000, 999999999);
             session.ProposedLevelIndex = _gw.PickRandomAuthenticLevel(session.LevelIndex);
-            session.ProposedRoute = session.Format == McsrRuleFormat.BiomeSprint ? rng.Next(1, Mathf.Max(2, _gw.SprintBiomeCount())) : 0;
+            session.ProposedRoute = session.Format == PcsrRuleFormat.BiomeSprint ? rng.Next(1, Mathf.Max(2, _gw.SprintBiomeCount())) : 0;
 
             session.MyRerollVoteActive = true;
             session.RerollVoteDeadline = Time.realtimeSinceStartup + MatchSession.RerollVoteTimeoutSeconds;
