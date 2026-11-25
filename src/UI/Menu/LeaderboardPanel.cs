@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using RankedPeak.Services;
 using RankedPeak.Ui.Native;
 using TMPro;
@@ -8,161 +7,171 @@ using UnityEngine.UI;
 
 namespace PeakCSR
 {
-    // 下方分区: 全服天梯真表格 (Top 8 + 斑马纹 + 点击查档案, 原 BuildBoardBox + RefreshBoard 收口)
+    // 下方分区: 天梯速览
+    //
+    // Top3 用领奖台呈现 (台阶高度 1 > 2 > 3, 台阶色调跟随段位色),
+    // 右侧是"我的排名"卡, 下方是完整榜入口。整块只占左列宽度,
+    // 把实时匹配下方的空白区吃掉。
     public sealed class LeaderboardPanel
     {
-        private const float BoxPad = 24f;
-        private const float RefreshBtnY = 12f;
-        private const float RefreshBtnH = 36f;
-        private const float BoardRowH = 22f;
-        // 天梯表格列坐标 (相对 box 内容区左边缘), 表头与数据行共用
-        private const float ColRankX = 0f;
-        private const float ColRankW = 52f;
-        private const float ColNameX = 52f;
-        private const float ColNameW = 268f;
-        private const float ColTierX = 320f;
-        private const float ColTierW = 176f;
-        private const float ColEloX = 496f;
-        private const float ColEloW = 110f;
-        private const float ColRecordX = 616f;
-        private const float ColRecordW = 128f;
-        private const float ColModesX = 744f;
-        private const float ColModesW = 456f;
-        private const float BoardHeaderY = 84f;
-        private const float BoardHeaderH = 30f;
-        private const float BoardRowStartY = 118f;
+        private const float BoxPad = MenuLayout.BoxPad;
+
+        // 领奖台区域 (相对 Box 左上角), 起点让开标题与状态行
+        private const float PodiumY = 72f;
+        private const float PodiumW = 330f;
+        private const float PodiumH = 142f;
+
+        // 台阶视觉顺序固定为 #2 #1 #3
+        private const float StepW = 104f;
+        private static readonly float[] StepX = { 113f, 0f, 226f };
+        private static readonly float[] StepH = { 88f, 68f, 52f };
+
+        // 名字 / 分数相对台阶顶的上浮距离
+        private const float NameDrop = 40f;
+        private const float EloDrop = 19f;
+
+        // 台阶固定金/银/铜: 段位色用作文字色
+        private static readonly Color[] StepColors =
+        {
+            new Color(0.706f, 0.518f, 0.078f, 1f),  // #1 金
+            new Color(0.478f, 0.522f, 0.573f, 1f),  // #2 银
+            new Color(0.639f, 0.400f, 0.204f, 1f)   // #3 铜
+        };
 
         private readonly PcsrMenuWindow _host;
         public readonly RectTransform Box;
 
-        private TextMeshProUGUI _lblBoardMeta;
-        private readonly TextMeshProUGUI[] _colRank = new TextMeshProUGUI[8];
-        private readonly TextMeshProUGUI[] _colName = new TextMeshProUGUI[8];
-        private readonly TextMeshProUGUI[] _colTier = new TextMeshProUGUI[8];
-        private readonly TextMeshProUGUI[] _colElo = new TextMeshProUGUI[8];
-        private readonly TextMeshProUGUI[] _colRecord = new TextMeshProUGUI[8];
-        private readonly TextMeshProUGUI[] _colModes = new TextMeshProUGUI[8];
-        private readonly Button[] _rowButtons = new Button[8];
-        private readonly Image[] _rowStripes = new Image[8];
-        // 每一行当前"画出来的"条目快照: 点行时按它取, 不按实时的 svc.Entries 取
-        private readonly CloudRankEntry[] _rowEntries = new CloudRankEntry[8];
-        private TextMeshProUGUI _lblBoardEmpty;
-        // 表头整组 (底色条 + 各列表头), 数据为空时整体隐藏
-        private readonly List<GameObject> _boardHeaderParts = new List<GameObject>();
+        private TextMeshProUGUI _lblMeta;
+        // 三座领奖台各自一个容器, 显隐整块切换
+        private readonly GameObject[] _podiumRoots = new GameObject[3];
+        private readonly Image[] _podiumCaps = new Image[3];
+        private readonly TextMeshProUGUI[] _podiumRanks = new TextMeshProUGUI[3];
+        private readonly TextMeshProUGUI[] _podiumNames = new TextMeshProUGUI[3];
+        private readonly TextMeshProUGUI[] _podiumElos = new TextMeshProUGUI[3];
+        private readonly Button[] _podiumButtons = new Button[3];
+        // 绘制时快照, 点击按快照取, 不用实时列表
+        private readonly CloudRankEntry[] _podiumEntries = new CloudRankEntry[3];
+        private TextMeshProUGUI _lblEmpty;
+
+        private TextMeshProUGUI _myRankLine;
+        private TextMeshProUGUI _myTierLine;
+        private TextMeshProUGUI _myEloLine;
+        private TextMeshProUGUI _myRecordLine;
 
         public LeaderboardPanel(PcsrMenuWindow host, RectTransform body, float x, float y, float w, float h)
         {
             _host = host;
             float inner = w - BoxPad * 2f;
             Box = PeakWindowStyle.CreateBox(body, "BoxBoard", CsrLoc.T("win.box.board"), x, y, w, h);
-
             LocalizedTextBinder.BindBoxHeading(Box, "win.box.board");
-            _lblBoardMeta = UiKit.CreateText(Box, "LblMeta", "", 16f, PeakWindowStyle.TextMuted, BoxPad, 52f, inner - 220f, 24f);
-            Button btnRefreshBoard = PeakWindowStyle.CreatePill(
-                Box, "BtnRefreshBoard", CsrLoc.T("hud.btn.refresh_board"),
-                w - BoxPad - 180f, RefreshBtnY, 180f, RefreshBtnH, 17f);
-            btnRefreshBoard.onClick.AddListener(new UnityAction(OnRefreshBoardClicked));
-            LocalizedTextBinder.BindPill(btnRefreshBoard, "hud.btn.refresh_board");
-            UiKit.ShortenBoxHeading(Box, w, 180f + 12f);
 
-            PeakWindowStyle.CreateSeparator(Box, "BoardSep", BoxPad, 78f, inner);
+            // 顶部状态行 (云端状态 + 刷新时间)
+            _lblMeta = UiKit.CreateText(Box, "LblMeta", "", 15f, PeakWindowStyle.TextMuted, BoxPad, 46f, inner, 22f);
+            UiKit.ShortenBoxHeading(Box, w, 0f);
 
-            // 表头: 逐列独立定位, 与数据行共用同一套列坐标
-            _boardHeaderParts.Clear();
+            BuildPodium();
+            BuildMyCard(inner);
+            BuildOpenButton(inner, h);
 
-            Color headerBgColor = new Color(0.82f, 0.86f, 0.87f, 1f);
-            Image headerBg = PeakWindowStyle.CreateSurface(Box, "BoardHeaderBg", headerBgColor, 6);
-            NativeUiFactory.Place((RectTransform)headerBg.transform, BoxPad, BoardHeaderY, inner, BoardHeaderH);
-            headerBg.raycastTarget = false;
-            _boardHeaderParts.Add(headerBg.gameObject);
+            _lblEmpty = UiKit.CreateText(Box, "BoardEmpty", CsrLoc.T("win.board.empty"), 15f,
+                PeakWindowStyle.TextMuted, BoxPad, PodiumY + 52f, PodiumW, 24f);
+            LocalizedTextBinder.Bind(_lblEmpty, "win.board.empty");
+        }
 
-            TextMeshProUGUI headRank = PeakWindowStyle.CreateText(Box, "BoardHeaderRank", "#", 15f, PeakWindowStyle.Heading, TextAlignmentOptions.Left);
-            NativeUiFactory.Place((RectTransform)headRank.transform, BoxPad + ColRankX, BoardHeaderY + 5f, ColRankW, 20f);
-            headRank.textWrappingMode = TextWrappingModes.NoWrap;
-            headRank.overflowMode = TextOverflowModes.Truncate;
-            headRank.margin = Vector4.zero;
-            _boardHeaderParts.Add(headRank.gameObject);
-
-            AddHeaderCell(Box, "BoardHeaderName", "win.board.col.player", ColNameX, ColNameW, TextAlignmentOptions.Left);
-            AddHeaderCell(Box, "BoardHeaderTier", "win.board.col.tier", ColTierX, ColTierW, TextAlignmentOptions.Left);
-            AddHeaderCell(Box, "BoardHeaderElo", "win.board.col.elo", ColEloX, ColEloW, TextAlignmentOptions.Right);
-            AddHeaderCell(Box, "BoardHeaderRecord", "win.board.col.record", ColRecordX, ColRecordW, TextAlignmentOptions.Left);
-            AddHeaderCell(Box, "BoardHeaderModes", "win.board.col.modes", ColModesX, ColModesW, TextAlignmentOptions.Left);
-            // '#' 列头无需翻译, 不挂绑定
-
-            Color stripeColor = new Color(0.86f, 0.89f, 0.88f, 1f);
-            for (int i = 0; i < 8; i++)
+        // Top3 领奖台: 每座一个容器, 内部坐标从 0 起算
+        private void BuildPodium()
+        {
+            for (int i = 0; i < 3; i++)
             {
-                float rowY = BoardRowStartY + i * BoardRowH;
+                GameObject root = new GameObject("Podium" + i, typeof(RectTransform));
+                root.transform.SetParent(Box, false);
+                RectTransform rootRt = (RectTransform)root.transform;
+                NativeUiFactory.Place(rootRt, BoxPad + StepX[i], PodiumY, StepW, PodiumH);
+                _podiumRoots[i] = root;
 
-                // 斑马纹: 隔行铺一层极浅底色, 长行更容易横向追踪
-                if ((i & 1) == 1)
-                {
-                    Image stripe = PeakWindowStyle.CreateSurface(Box, "RowStripe" + i, stripeColor, 5);
-                    NativeUiFactory.Place((RectTransform)stripe.transform, BoxPad, rowY - 1f, inner, BoardRowH);
-                    stripe.raycastTarget = false;
-                    _rowStripes[i] = stripe;
-                }
+                float stepH = StepH[i];
+                float stepTop = PodiumH - stepH;
 
-                _colRank[i] = UiKit.CreateText(Box, "Rank" + i, "", 16f, PeakWindowStyle.TextPrimary,
-                    BoxPad + ColRankX, rowY, ColRankW, 22f);
-                _colName[i] = UiKit.CreateText(Box, "Name" + i, "", 16f, PeakWindowStyle.TextPrimary,
-                    BoxPad + ColNameX, rowY, ColNameW, 22f);
-                _colTier[i] = UiKit.CreateText(Box, "Tier" + i, "", 16f, PeakWindowStyle.TextPrimary,
-                    BoxPad + ColTierX, rowY, ColTierW, 22f);
-                _colElo[i] = UiKit.CreateTextRight(Box, "Elo" + i, "", 17f, PeakWindowStyle.TextPrimary,
-                    BoxPad + ColEloX, rowY, ColEloW, 22f);
-                _colRecord[i] = UiKit.CreateText(Box, "Rec" + i, "", 15f, PeakWindowStyle.TextMuted,
-                    BoxPad + ColRecordX, rowY, ColRecordW, 22f);
-                _colModes[i] = UiKit.CreateText(Box, "Modes" + i, "", 15f, PeakWindowStyle.TextMuted,
-                    BoxPad + ColModesX, rowY, ColModesW, 22f);
+                // 台阶底座: 金/银/铜固定色, 与名次一一对应
+                Image step = PeakWindowStyle.CreateSurface(rootRt, "Step", StepColors[i], 8);
+                NativeUiFactory.Place((RectTransform)step.transform, 0f, stepTop, StepW, stepH);
 
-                // 整行透明按钮: 点击打开玩家档案
-                Image hit = PeakWindowStyle.CreateSurface(Box, "RowHit" + i, new Color(1f, 1f, 1f, 0f), 6);
-                RectTransform hitRt = (RectTransform)hit.transform;
-                NativeUiFactory.Place(hitRt, BoxPad, rowY - 1f, inner, BoardRowH);
+                // 台阶上的名次
+                _podiumRanks[i] = PeakWindowStyle.CreateText((RectTransform)step.transform, "Rank", "",
+                    26f, PeakWindowStyle.TextOnBar, TextAlignmentOptions.Center);
+                RectTransform rankRt = (RectTransform)_podiumRanks[i].transform;
+                rankRt.anchorMin = Vector2.zero;
+                rankRt.anchorMax = Vector2.one;
+                rankRt.offsetMin = new Vector2(0f, 8f);
+                rankRt.offsetMax = Vector2.zero;
+                _podiumRanks[i].margin = Vector4.zero;
+
+                // 自己的台阶顶端加一条白边, 一眼看出哪座是我
+                Image cap = PeakWindowStyle.CreateSurface(rootRt, "Cap", PeakWindowStyle.TextOnBar, 6);
+                NativeUiFactory.Place((RectTransform)cap.transform, 0f, stepTop, StepW, 4f);
+                cap.gameObject.SetActive(false);
+                _podiumCaps[i] = cap;
+
+                _podiumNames[i] = UiKit.CreateText(rootRt, "Name", "", 15f, PeakWindowStyle.TextPrimary,
+                    0f, stepTop - NameDrop, StepW, 22f);
+                _podiumNames[i].alignment = TextAlignmentOptions.Center;
+                _podiumNames[i].enableAutoSizing = true;
+                _podiumNames[i].fontSizeMin = 10f;
+                _podiumNames[i].fontSizeMax = 15f;
+
+                _podiumElos[i] = UiKit.CreateText(rootRt, "Elo", "", 15f, PeakWindowStyle.TextMuted,
+                    0f, stepTop - EloDrop, StepW, 20f);
+                _podiumElos[i].alignment = TextAlignmentOptions.Center;
+
+                // 整列可点, 三列互不重叠; 透明底只为接射线
+                Image hit = PeakWindowStyle.CreateSurface(rootRt, "Hit", new Color(1f, 1f, 1f, 0f), 5);
+                NativeUiFactory.Place((RectTransform)hit.transform, 0f, 0f, StepW, PodiumH);
                 hit.raycastTarget = true;
-                Button hitBtn = hit.gameObject.AddComponent<Button>();
-                hitBtn.transition = Selectable.Transition.None;
+                Button btn = hit.gameObject.AddComponent<Button>();
+                btn.transition = Selectable.Transition.None;
                 int captured = i;
-                hitBtn.onClick.AddListener(new UnityAction(() => OnBoardRowClicked(captured)));
-                _rowButtons[i] = hitBtn;
+                btn.onClick.AddListener(new UnityAction(() => OnPodiumClicked(captured)));
+                _podiumButtons[i] = btn;
             }
-
-            _lblBoardEmpty = UiKit.CreateText(Box, "BoardEmpty", CsrLoc.T("win.board.empty"), 16f, PeakWindowStyle.TextMuted,
-                BoxPad, BoardRowStartY + 6f, inner, 24f);
-            LocalizedTextBinder.Bind(_lblBoardEmpty, "win.board.empty");
         }
 
-        private void AddHeaderCell(
-            RectTransform box, string name, string locKey, float x, float w, TextAlignmentOptions align)
+        private void BuildMyCard(float inner)
         {
-            TextMeshProUGUI cell = PeakWindowStyle.CreateText(box, name, CsrLoc.T(locKey), 15f, PeakWindowStyle.Heading, align);
-            NativeUiFactory.Place((RectTransform)cell.transform, BoxPad + x, BoardHeaderY + 5f, w, 20f);
-            cell.textWrappingMode = TextWrappingModes.NoWrap;
-            cell.overflowMode = TextOverflowModes.Truncate;
-            cell.margin = Vector4.zero;
-            LocalizedTextBinder.Bind(cell, locKey);
-            _boardHeaderParts.Add(cell.gameObject);
+            float cardX = BoxPad + PodiumW + 12f;
+            float cardW = Mathf.Max(150f, inner - PodiumW - 12f);
+            Image card = PeakWindowStyle.CreateSurface(Box, "MyCard", PeakWindowStyle.WindowFill, 10);
+            NativeUiFactory.Place((RectTransform)card.transform, cardX, PodiumY, cardW, PodiumH);
+            RectTransform cardRt = (RectTransform)card.transform;
+
+            const float pad = 14f;
+            float cw = cardW - pad * 2f;
+            _myRankLine = UiKit.CreateText(cardRt, "MyRank", "", 16f, PeakWindowStyle.TextMuted, pad, 12f, cw, 22f);
+            _myTierLine = UiKit.CreateText(cardRt, "MyTier", "", 18f, PeakWindowStyle.TextPrimary, pad, 40f, cw, 26f);
+            _myEloLine = UiKit.CreateText(cardRt, "MyElo", "", 26f, PeakWindowStyle.TextPrimary, pad, 72f, cw, 34f);
+            _myRecordLine = UiKit.CreateText(cardRt, "MyRecord", "", 14f, PeakWindowStyle.TextMuted, pad, 112f, cw, 20f);
         }
 
-        private void OnRefreshBoardClicked()
+        private void BuildOpenButton(float inner, float h)
         {
-            LadderSyncService svc = LadderSyncService.Instance;
-            if (svc != null)
-            {
-                svc.RefreshLeaderboard();
-            }
-            _host.RefreshDynamic();
+            float btnY = PodiumY + PodiumH + 10f;
+            float btnH = Mathf.Max(40f, h - btnY - 18f);
+            Button openBtn = PeakWindowStyle.CreatePill(Box, "BtnFullBoard", CsrLoc.T("win.board.open_full"),
+                BoxPad, btnY, inner, btnH, 20f);
+            openBtn.onClick.AddListener(new UnityAction(OnOpenFullClicked));
+            LocalizedTextBinder.BindPill(openBtn, "win.board.open_full");
         }
 
-        private void OnBoardRowClicked(int index)
+        private void OnPodiumClicked(int index)
         {
-            // 用绘制时存下的条目
-            if (index < 0 || index >= _rowEntries.Length) return;
-            CloudRankEntry e = _rowEntries[index];
+            if (index < 0 || index >= _podiumEntries.Length) return;
+            CloudRankEntry e = _podiumEntries[index];
             if (e == null || string.IsNullOrEmpty(e.SteamId)) return;
             _host.OpenProfileCard(e);
+        }
+
+        private void OnOpenFullClicked()
+        {
+            _host.OpenFullBoard();
         }
 
         public void Refresh(MatchCoordinator mc)
@@ -172,69 +181,94 @@ namespace PeakCSR
                 LadderSyncService svc = LadderSyncService.Instance;
                 int count = svc != null && svc.Entries != null ? svc.Entries.Count : 0;
 
-                if (_lblBoardMeta != null)
+                if (_lblMeta != null)
                 {
-                    string status = svc != null && svc.Entries != null && count >= 0 && svc.Status.Kind != LadderSyncService.CloudStatusKind.None
-                        ? svc.CloudStatus
-                        : CsrLoc.T("cloud.updated", count);
                     string clock = svc != null
                         ? CloudLadderClient.FormatRefreshClock(svc.LastRefreshedAtMs)
                         : "--:--:--";
-                    _lblBoardMeta.text = status + "   " + CsrLoc.T("win.queue.refreshed", clock);
+                    int pending = svc != null ? svc.PendingReportCount : 0;
+                    string status = svc != null && svc.Status.Kind != LadderSyncService.CloudStatusKind.None
+                        ? svc.CloudStatus
+                        : CsrLoc.T("cloud.updated", count);
+                    _lblMeta.text = status + "   " + CsrLoc.T("win.queue.refreshed", clock)
+                        + (pending > 0 ? "   " + CsrLoc.T("cloud.pending_queue", pending) : "");
                 }
 
-                if (_lblBoardEmpty != null)
-                {
-                    _lblBoardEmpty.gameObject.SetActive(count == 0);
-                }
-                // 表头是底色条 + 六个独立列, 必须整组一起显隐
-                for (int h = 0; h < _boardHeaderParts.Count; h++)
-                {
-                    if (_boardHeaderParts[h] != null) _boardHeaderParts[h].SetActive(count > 0);
-                }
+                if (_lblEmpty != null) _lblEmpty.gameObject.SetActive(count == 0);
 
                 string mySteamId = "";
                 try { mySteamId = SteamIdentity.GetSteamId64(); } catch { }
 
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < 3; i++)
                 {
                     bool has = svc != null && svc.Entries != null && i < svc.Entries.Count;
-                    UiKit.SetActive(_colRank[i], has);
-                    UiKit.SetActive(_colName[i], has);
-                    UiKit.SetActive(_colTier[i], has);
-                    UiKit.SetActive(_colElo[i], has);
-                    UiKit.SetActive(_colRecord[i], has);
-                    UiKit.SetActive(_colModes[i], has);
-                    UiKit.SetActive(_rowButtons[i], has);
-                    UiKit.SetActive(_rowStripes[i], has);
+                    if (_podiumRoots[i] != null && _podiumRoots[i].activeSelf != has)
+                    {
+                        _podiumRoots[i].SetActive(has);
+                    }
                     if (!has)
                     {
-                        _rowEntries[i] = null;
+                        _podiumEntries[i] = null;
                         continue;
                     }
 
                     CloudRankEntry e = svc.Entries[i];
-                    _rowEntries[i] = e;
+                    _podiumEntries[i] = e;
                     string tierHex = TierCatalog.GetTierHexColorOnLight(e.Elo);
                     string name = e.DisplayName;
                     if (string.IsNullOrEmpty(name)) name = CsrLoc.T("common.anonymous");
-
                     bool isMe = !string.IsNullOrEmpty(mySteamId) && e.SteamId == mySteamId;
                     string meTag = isMe ? CsrLoc.T("win.board.you_tag") : "";
+                    string shownName = UiKit.FitText(_podiumNames[i], name, meTag.Length * 2.4f);
 
-                    // 昵称长度不可控, 先按可用像素宽度截断再拼富文本, 否则会直接糊到下一列
-                    string shownName = UiKit.FitText(_colName[i], name, isMe ? meTag.Length * 2.4f : 0f);
-                    _colRank[i].text = "<b>#" + e.Rank + "</b>";
-                    _colName[i].text = PcsrColors.WrapBold(tierHex, shownName) + meTag;
-                    _colTier[i].text = PcsrColors.Wrap(tierHex, TierCatalog.GetTierName(e.Elo));
-                    _colElo[i].text = PcsrColors.WrapBold(isMe ? PcsrColors.AccentBlue : "2A3441", e.Elo.ToString());
-                    _colRecord[i].text = CsrLoc.T("win.board.record", e.Wins, e.Losses);
-                    _colModes[i].text = CsrLoc.T("win.board.modes",
-                        e.WinsAllPeak, e.LossesAllPeak,
-                        e.WinsHardcore, e.LossesHardcore,
-                        e.WinsSprint, e.LossesSprint);
+                    if (_podiumCaps[i] != null && _podiumCaps[i].gameObject.activeSelf != isMe)
+                    {
+                        _podiumCaps[i].gameObject.SetActive(isMe);
+                    }
+
+                    _podiumRanks[i].text = "#" + (i + 1);
+                    _podiumNames[i].text = PcsrColors.Wrap(tierHex, shownName) + meTag;
+                    _podiumElos[i].text = PcsrColors.WrapNum(tierHex, e.Elo.ToString());
                 }
+
+                RefreshMyRank(svc);
             });
         }
+
+        // 我的排名: 优先用云端档案里的 GlobalRank (即使不在 Top50 也有值)
+        private void RefreshMyRank(LadderSyncService svc)
+        {
+            MatchCoordinator mc = MatchCoordinator.Instance;
+            if (mc == null) return;
+
+            int elo = mc.Profile.CurrentElo;
+            string tierHex = TierCatalog.GetTierHexColorOnLight(elo);
+            string tierName = TierCatalog.GetTierName(elo);
+
+            int rank = 0;
+            CloudProfile my = svc != null ? svc.MyProfile : null;
+            if (my != null && my.GlobalRank > 0) rank = my.GlobalRank;
+
+            if (_myRankLine != null)
+            {
+                string rankText = rank > 0 ? PcsrColors.Wrap(PcsrColors.AccentBlue, "#" + rank) : "-";
+                _myRankLine.text = CsrLoc.T("win.board.my_rank", rankText);
+            }
+            if (_myTierLine != null)
+            {
+                _myTierLine.text = PcsrColors.WrapBold(tierHex, tierName);
+            }
+            if (_myEloLine != null)
+            {
+                _myEloLine.text = PcsrColors.WrapNum(tierHex, elo.ToString())
+                    + " <size=60%>" + CsrLoc.T("win.board.elo_unit") + "</size>";
+            }
+            if (_myRecordLine != null)
+            {
+                _myRecordLine.text = CsrLoc.T("win.board.record", mc.Profile.Wins, mc.Profile.Losses)
+                    + "  ·  " + CsrLoc.T("win.board.my_winrate", mc.Profile.WinRatePercent);
+            }
+        }
+
     }
 }
