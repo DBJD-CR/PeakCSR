@@ -8,6 +8,7 @@ namespace PeakCSR
         public const string Positive = "1E7E45";    // 祖母深绿: 胜/加分/我方更快
         public const string Danger = "C62828";      // 警示红: 负/扣分/我方更慢
         public const string Warning = "FFD933";     // 钻金: 提示/投票
+        public const string GoldNum = "B8860B";     // 暗金: 全山 PB 主展示 (浅底上可读)
         public const string VoidTone = "5A6270";    // 炭灰: 作废/无数据
         public const string Muted = "8A93A5";       // 次级灰: 占位说明
         public const string AccentBlue = "0B5FA5";  // 强调蓝: 自己的 ELO/群系
@@ -42,6 +43,14 @@ namespace PeakCSR
         public static string WrapBold(string hex, string content)
         {
             return "<color=#" + hex + "><b>" + content + "</b></color>";
+        }
+
+        // 数字专用: 只上色不加粗
+        // 本游戏数字字体加粗后笔画粘连, 可读性反而比常规字重差, 因此所有
+        // 含数字的展示位统一走这里; 非数字的强调 (群系名/段位名) 仍可用 WrapBold
+        public static string WrapNum(string hex, string content)
+        {
+            return "<color=#" + hex + ">" + content + "</color>";
         }
     }
 }
