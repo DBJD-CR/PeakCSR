@@ -7,6 +7,8 @@ import { handleLeaderboard } from "./handlers/leaderboard.js";
 import { handleProfile, handleProfileUpdate } from "./handlers/profile.js";
 import { handleHistory } from "./handlers/history.js";
 import { handleMatchReport } from "./handlers/report.js";
+import { handleReportDetail } from "./handlers/reportdetail.js";
+import { handlePbsGet, handlePbsPost } from "./handlers/pbs.js";
 import { handleAdmin } from "./handlers/admin.js";
 
 export default {
@@ -31,6 +33,16 @@ export default {
       }
       if (url.pathname === "/api/history" && request.method === "GET") {
         return await handleHistory(url, env);
+      }
+      if (url.pathname === "/api/reportdetail" && request.method === "GET") {
+        return await handleReportDetail(url, env);
+      }
+      if (url.pathname === "/api/pbs" && request.method === "GET") {
+        return await handlePbsGet(url, env);
+      }
+      if (url.pathname === "/api/pbs" && request.method === "POST") {
+        const body = await request.json();
+        return await handlePbsPost(body, env);
       }
       if (url.pathname === "/api/report" && request.method === "POST") {
         const body = await request.json();
