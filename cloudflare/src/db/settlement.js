@@ -2,7 +2,7 @@
 // 评分计算由 domain/rating.js 提供, 这里只做 DB 编排
 
 import {
-  getModeMultiplier, getMinWinDelta, getMaxLossDelta,
+  getModeMultiplier, getMinWinDelta,
   computeProgressModifier, computeSettlement, evaluateAntiBoostWeight,
   RULES
 } from "../domain/rating.js";
@@ -12,7 +12,7 @@ import { modeColumns } from "./players.js";
 // 修复方案 1.2.4 缺陷: 云端结算此前完全没有 Anti-Boost, 本地算完 0 分后 3 秒被权威分覆盖回全额加分
 export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerName, winnerSeedElo,
   loserId, loserName, loserSeedElo, levelIndex, ascent, format, route, durationMs,
-  winnerProgress, loserProgress, verifyMethod, now) {
+  winnerProgress, loserProgress, verifyMethod, now, winnerSplitsJson, loserSplitsJson) {
   const winPlayer = await getOrCreate(db, winnerId, winnerName, winnerSeedElo);
   const losePlayer = await getOrCreate(db, loserId, loserName, loserSeedElo);
 
@@ -32,9 +32,8 @@ export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerN
   const winModeMult = mult;
   const loseModeMult = mult;
 
-  // 保底是绝对下限, 不参与赛制倍率
+  // 保底是绝对下限, 不参与赛制倍率, 且只对胜方生效
   const winMin = getMinWinDelta(format, ascent, winPlayer.elo);
-  const loseMax = getMaxLossDelta(format);
 
   let winBase = Math.round(winK * (1.0 - winExpected) * (winWeight * winModeMult));
   let loseBase = Math.round(loseK * (0.0 - loseExpected) * (loseWeight * loseModeMult));
@@ -52,9 +51,9 @@ export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerN
   let winDelta = winBase + winBonus;
   let loseDelta = loseBase + loseBonus;
 
-  // 保底 / 扣分上限绝对钳制 (与客户端 ComputeDelta 一致: 只在权重 > 0.01 时施加)
+  // 与客户端 ComputeDelta 一致: 败方没有任何扣分兜底, 只禁止"输了反而加分"
   if (winWeight > 0.01) winDelta = Math.max(winMin, winDelta);
-  if (loseWeight > 0.01) loseDelta = Math.max(loseMax, Math.min(0, loseDelta));
+  if (loseWeight > 0.01) loseDelta = Math.min(0, loseDelta);
 
   // 分数钳制必须走规则
   const clampMin = RULES.elo.clampMin;
@@ -64,6 +63,8 @@ export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerN
   const newWinElo = clampElo(winPlayer.elo + winDelta);
   const newWinPeak = Math.max(winPlayer.peak_elo, newWinElo);
   const newWinStreak = winPlayer.streak >= 0 ? winPlayer.streak + 1 : 1;
+  // 历史最长连胜: 只增不减, 由胜方这一局的连胜推进决定
+  const newWinBestStreak = Math.max(winPlayer.best_streak || 0, newWinStreak);
 
   const newLoseElo = clampElo(losePlayer.elo + loseDelta);
   const newLosePeak = Math.max(losePlayer.peak_elo, newLoseElo);
@@ -77,7 +78,7 @@ export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerN
   const loseModeCols = modeColumns(format, "losses");
 
   // 历史行放在批次最前且不使用 OR IGNORE
-  await db.batch([
+  const batch = [
     db.prepare(
       `INSERT INTO settled_matches
        (match_key, invite_code, seed, winner_steam_id, loser_steam_id, winner_delta, loser_delta,
@@ -90,14 +91,35 @@ export async function settleEloOnDb(db, key, inviteCode, seed, winnerId, winnerN
       levelIndex, ascent, format, route, durationMs, winnerProgress, loserProgress,
       verifyMethod, now),
     db.prepare(
-      `UPDATE players SET player_name = ?, elo = ?, peak_elo = ?, wins = wins + 1, streak = ?,
+      `UPDATE players SET player_name = ?, elo = ?, peak_elo = ?, wins = wins + 1, streak = ?, best_streak = ?,
         ${winModeCols}, updated_at = ? WHERE steam_id = ?`
-    ).bind(winnerName, newWinElo, newWinPeak, newWinStreak, now, winnerId),
+    ).bind(winnerName, newWinElo, newWinPeak, newWinStreak, newWinBestStreak, now, winnerId),
     db.prepare(
       `UPDATE players SET player_name = ?, elo = ?, peak_elo = ?, losses = losses + 1, streak = ?,
         ${loseModeCols}, updated_at = ? WHERE steam_id = ?`
     ).bind(loserName, newLoseElo, newLosePeak, newLoseStreak, now, loserId)
-  ]);
+  ];
+
+  // 战报分段: 双方各写各的那半, 合并语义是"更完整的覆盖更短的"
+  //
+  // 为什么用 length 比较而不是简单"非空即覆盖":
+  //   重传/补传可能带来更短的分段 (例如中途断线只记了 3 段),
+  //   简单非空覆盖会把先前完整的 8 段冲掉, 回看时就少了一半赛段。
+  if (winnerSplitsJson || loserSplitsJson) {
+    batch.push(db.prepare(
+      `INSERT INTO match_splits (match_key, winner_splits, loser_splits, version, updated_at)
+       VALUES (?, ?, ?, 1, ?)
+       ON CONFLICT(match_key) DO UPDATE SET
+         winner_splits = CASE WHEN length(excluded.winner_splits) > length(match_splits.winner_splits)
+                              THEN excluded.winner_splits ELSE match_splits.winner_splits END,
+         loser_splits = CASE WHEN length(excluded.loser_splits) > length(match_splits.loser_splits)
+                             THEN excluded.loser_splits ELSE match_splits.loser_splits END,
+         version = match_splits.version + 1,
+         updated_at = excluded.updated_at`
+    ).bind(key, winnerSplitsJson || "[]", loserSplitsJson || "[]", now));
+  }
+
+  await db.batch(batch);
 
   return {
     winnerElo: newWinElo, loserElo: newLoseElo,

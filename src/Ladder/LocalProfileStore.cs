@@ -19,8 +19,11 @@ namespace PeakCSR
         // 当前存档格式版本号
         private const int CurrentSchemaVersion = 2;
 
-        private static readonly string SaveDir = Path.Combine(Paths.PluginPath, "PeakCSR");
-        private static readonly string SavePath = Path.Combine(SaveDir, "elo_profile.json");
+        // 存档必须放在 config 而不是 plugins: plugins 是部署产物目录,
+        // 部署/升级会被整体清理, 放在那里迟早被连带删掉
+        private const string FileName = "elo_profile.json";
+        private static string SaveDir { get { return PcsrDataPaths.DataDir; } }
+        private static string SavePath { get { return PcsrDataPaths.Resolve(FileName); } }
 
         // 序列化 DTO (camelCase 与存档字段名对齐)
         private sealed class ProfileDto
@@ -35,10 +38,16 @@ namespace PeakCSR
             [JsonProperty("losses")] public int Losses;
             [JsonProperty("draws")] public int Draws;
             [JsonProperty("streak")] public int Streak;
+            // 新增字段不升 schemaVersion: 缺键时默认 0, 老档照常可读
+            [JsonProperty("bestStreak")] public int BestStreak;
             // 分赛制战绩数组 (0=全山 1=高难 2=单群系)
             [JsonProperty("modes")] public ModeRecordDto[] Modes;
 
             [JsonProperty("favoriteMap")] public int FavoriteMap = -1;
+            // 新增字段不升 schemaVersion: Newtonsoft 缺键即默认 -1, 老档照常可读
+            [JsonProperty("dislikedMap")] public int DislikedMap = -1;
+            // 国籍: 缺键默认空串, 老档照常可读
+            [JsonProperty("country")] public string Country = "";
             [JsonProperty("favoriteAscent")] public int FavoriteAscent = -999;
             [JsonProperty("favoriteFormat")] public int FavoriteFormat = -1;
             [JsonProperty("ascentGames")] public int[] AscentGames;
@@ -53,6 +62,10 @@ namespace PeakCSR
             [JsonProperty("losses")] public int Losses;
             [JsonProperty("games")] public int Games;
         }
+
+        // 备份失败遗留标记
+        private bool _backupPending;
+        private bool _backupPendingLogged;
 
         public string SelfSteamId
         {
@@ -83,6 +96,10 @@ namespace PeakCSR
             {
                 if (!File.Exists(SavePath))
                 {
+                    // 新建档必须留痕: 过去这里静默写默认档, 存档被误删后
+                    // 日志上完全看不出发生过数据丢失
+                    PcsrLog.LogWarning("[PeakCSR] 未找到本地 ELO 存档 (" + SavePath
+                        + ")，已新建默认档 " + defaultElo + " ELO。若此前有战绩，请检查云端档案。");
                     Save(record);
                 }
                 else
@@ -96,20 +113,40 @@ namespace PeakCSR
             }
         }
 
+
         // 重置为默认档之前先留一份带时间戳的备份
-        private static void BackupBeforeReset()
+        // 返回 true 表示可以安全重置 (无旧档或备份成功); false 表示备份失败, 调用方必须放弃重置
+        private bool BackupBeforeReset()
         {
-            if (!File.Exists(SavePath)) return;
-            string stamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-            string backupPath = SavePath + ".bak_" + stamp;
-            int suffix = 1;
-            while (File.Exists(backupPath))
+            if (!File.Exists(SavePath))
             {
-                backupPath = SavePath + ".bak_" + stamp + "_" + suffix;
-                suffix++;
+                // 没有旧档可丢, 解除保存限制
+                _backupPending = false;
+                _backupPendingLogged = false;
+                return true;
             }
-            File.Copy(SavePath, backupPath, false);
-            PcsrLog.LogWarning("[PeakCSR] 重置前已备份旧存档: " + backupPath);
+            try
+            {
+                string stamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+                string backupPath = SavePath + ".bak_" + stamp;
+                int suffix = 1;
+                while (File.Exists(backupPath))
+                {
+                    backupPath = SavePath + ".bak_" + stamp + "_" + suffix;
+                    suffix++;
+                }
+                File.Copy(SavePath, backupPath, false);
+                _backupPending = false;
+                _backupPendingLogged = false;
+                PcsrLog.LogWarning("[PeakCSR] 已备份旧存档: " + backupPath);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _backupPending = true;
+                PcsrLog.LogError("[PeakCSR] 重置前备份旧存档失败，暂不覆盖原档案: " + ex.Message);
+                return false;
+            }
         }
 
         private void LoadFromJson(PlayerRecord record, int defaultElo)
@@ -124,12 +161,15 @@ namespace PeakCSR
             catch (Exception ex)
             {
                 PcsrLog.LogWarning("[PeakCSR] 本地存档 JSON 解析失败，重置为默认档: " + ex.Message);
+                // 备份失败时不动盘上原文件, 留待人工恢复
+                if (!BackupBeforeReset()) return;
                 record.ResetToDefault(defaultElo);
                 Save(record);
                 return;
             }
             if (dto == null)
             {
+                if (!BackupBeforeReset()) return;
                 record.ResetToDefault(defaultElo);
                 Save(record);
                 return;
@@ -141,7 +181,7 @@ namespace PeakCSR
                 PcsrLog.LogWarning("[PeakCSR] 本地存档版本号为 " + dto.SchemaVersion + " (期望 "
                     + CurrentSchemaVersion + ")，旧格式不再迁移，已重置为初始分数。");
                 // Save 走 File.Replace(..., null), 原文件内容不会保留, 必须先备份
-                BackupBeforeReset();
+                if (!BackupBeforeReset()) return;
                 record.ResetToDefault(defaultElo);
                 Save(record);
                 return;
@@ -162,6 +202,8 @@ namespace PeakCSR
             if (string.IsNullOrEmpty(dto.Sig) || !string.Equals(dto.Sig, expectedSig, StringComparison.OrdinalIgnoreCase))
             {
                 PcsrLog.LogWarning("[PeakCSR] 检测到本地 ELO 存档签名校验不通过，已重置为初始分数。");
+                // 被手改的档案同样留底, 便于事后排查是误判还是真篡改
+                if (!BackupBeforeReset()) return;
                 record.ResetToDefault(defaultElo);
                 Save(record);
                 return;
@@ -175,6 +217,8 @@ namespace PeakCSR
             record.Losses = Math.Max(0, dto.Losses);
             record.Draws = Math.Max(0, dto.Draws);
             record.Streak = dto.Streak;
+            // BestStreak 是只增不减的历史峰值: 取存档值与当前连胜的较大者
+            record.BestStreak = Math.Max(Math.Max(0, dto.BestStreak), Math.Max(0, record.Streak));
 
             if (dto.Modes != null)
             {
@@ -186,10 +230,15 @@ namespace PeakCSR
                 }
             }
 
-            // favoriteMap 存的是群系索引; 超范围一律当未设置
+            // favoriteMap / dislikedMap 存的是群系索引; 超范围一律当未设置
             record.FavoriteMap = (dto.FavoriteMap >= 0 && dto.FavoriteMap < PcsrBiomes.Count) ? dto.FavoriteMap : -1;
+            record.DislikedMap = (dto.DislikedMap >= 0 && dto.DislikedMap < PcsrBiomes.Count) ? dto.DislikedMap : -1;
+            // 与最爱相同时按未设置处理, 保持与云端一致的互斥语义
+            if (record.DislikedMap >= 0 && record.DislikedMap == record.FavoriteMap) record.DislikedMap = -1;
             record.FavoriteAscent = dto.FavoriteAscent;
             record.FavoriteFormat = dto.FavoriteFormat;
+            // 国籍走统一归一, 老档缺键或手改的非法值都会收敛为未设置
+            record.Country = dto.Country;
 
             ApplyPreferenceStats(record, dto.AscentGames, dto.FormatGames);
         }
@@ -216,6 +265,17 @@ namespace PeakCSR
 
         public void Save(PlayerRecord record)
         {
+            // 上次备份失败: 先补做备份, 备份成功前拒绝覆盖现有档案
+            if (_backupPending && !BackupBeforeReset())
+            {
+                if (!_backupPendingLogged)
+                {
+                    _backupPendingLogged = true;
+                    PcsrLog.LogError("[PeakCSR] 旧存档尚未备份成功，本次保存已跳过，避免覆盖可恢复的原档案。");
+                }
+                return;
+            }
+
             string tmpPath = SavePath + ".tmp";
             try
             {
@@ -236,6 +296,7 @@ namespace PeakCSR
                     Losses = record.Losses,
                     Draws = record.Draws,
                     Streak = record.Streak,
+                    BestStreak = record.BestStreak,
                     Modes = new ModeRecordDto[]
                     {
                         new ModeRecordDto { Wins = record.Modes[0].Wins, Losses = record.Modes[0].Losses, Games = record.Modes[0].Games },
@@ -243,6 +304,8 @@ namespace PeakCSR
                         new ModeRecordDto { Wins = record.Modes[2].Wins, Losses = record.Modes[2].Losses, Games = record.Modes[2].Games }
                     },
                     FavoriteMap = record.FavoriteMap,
+                    DislikedMap = record.DislikedMap,
+                    Country = record.Country ?? "",
                     FavoriteAscent = record.FavoriteAscent,
                     FavoriteFormat = record.FavoriteFormat,
                     AscentGames = (int[])record.AscentGames.Clone(),

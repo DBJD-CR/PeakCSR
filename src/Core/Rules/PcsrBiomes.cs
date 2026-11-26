@@ -1,26 +1,6 @@
 namespace PeakCSR
 {
-    // 赛制枚举: 下标同时用于房间魔数编码与分赛制战绩数组
-    public enum McsrRuleFormat
-    {
-        StandardAllPeak = 0,
-        HardcoreAscent4 = 1,
-        BiomeSprint = 2
-    }
-
-    // 对局状态机枚举 (值序与重构前完全一致; Idle 由"无会话"表达, 会话内永不出现 Idle)
-    public enum CsMatchState
-    {
-        Idle,
-        SearchingLobby,
-        WaitingOpponent,
-        LoadingLevel,
-        Countdown,
-        Running,
-        Finished
-    }
-
-    // 游戏内真实群系列表 (原 PcsrBiomes 原样迁移)
+    // 游戏内真实群系列表
     // 顺序与游戏 RichPresence 的海拔顺序一致: 海岸 -> 天底
     public static class PcsrBiomes
     {

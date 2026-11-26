@@ -16,6 +16,12 @@ namespace PeakCSR
         // 本地 ELO / 档案变化 (原 EloCalculator.OnRatingChanged)
         public static Action RatingChanged;
 
+        // 云端权威结算落地 (携带权威分): 战报据此把本地预估改写成最终值
+        public static Action<int> AuthoritativeEloApplied;
+
+        // 某个玩家的 PB 数据可用/已更新 (携带 steamId): 异步拉取完成后通知档案卡重绘
+        public static Action<string> PbsUpdated;
+
         internal static void RaiseMatchStateChanged()
         {
             Action h = MatchStateChanged;
@@ -32,6 +38,18 @@ namespace PeakCSR
         {
             Action h = RatingChanged;
             if (h != null) h();
+        }
+
+        internal static void RaiseAuthoritativeEloApplied(int elo)
+        {
+            Action<int> h = AuthoritativeEloApplied;
+            if (h != null) h(elo);
+        }
+
+        internal static void RaisePbsUpdated(string steamId)
+        {
+            Action<string> h = PbsUpdated;
+            if (h != null) h(steamId);
         }
     }
 
@@ -57,9 +75,26 @@ namespace PeakCSR
             remove { CsrEvents.RatingChanged -= value; }
         }
 
+        public static event Action<int> OnAuthoritativeEloApplied
+        {
+            add { CsrEvents.AuthoritativeEloApplied += value; }
+            remove { CsrEvents.AuthoritativeEloApplied -= value; }
+        }
+
+        public static event Action<string> OnPbsUpdated
+        {
+            add { CsrEvents.PbsUpdated += value; }
+            remove { CsrEvents.PbsUpdated -= value; }
+        }
+
         public static void PublishMatchStateChanged()
         {
             CsrEvents.RaiseMatchStateChanged();
+        }
+
+        public static void PublishPbsUpdated(string steamId)
+        {
+            CsrEvents.RaisePbsUpdated(steamId);
         }
 
         public static void PublishEndScreenClosed()
@@ -72,12 +107,18 @@ namespace PeakCSR
             CsrEvents.RaiseRatingChanged();
         }
 
+        public static void PublishAuthoritativeEloApplied(int elo)
+        {
+            CsrEvents.RaiseAuthoritativeEloApplied(elo);
+        }
+
         // 防泄漏辅助: 摘除所有静态订阅 (主要用于域重载调试场景)
         public static void ClearStaticSubscriptions()
         {
             CsrEvents.MatchStateChanged = null;
             CsrEvents.EndScreenClosed = null;
             CsrEvents.RatingChanged = null;
+            CsrEvents.AuthoritativeEloApplied = null;
         }
     }
 }

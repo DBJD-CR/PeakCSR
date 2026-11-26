@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using PeakCSR.Practice;
 using RankedPeak.Ui.Native;
 using TMPro;
 using UnityEngine;
@@ -10,7 +11,7 @@ namespace PeakCSR
     // 右上分区: 当前状态、房间/对手信息、进度对比、投票/投降按钮 (原 BuildMatchBox + 刷新收口)
     public sealed class MatchStatusPanel
     {
-        private const float BoxPad = 24f;
+        private const float BoxPad = MenuLayout.BoxPad;
 
         private readonly PcsrMenuWindow _host;
         public readonly RectTransform Box;
@@ -117,6 +118,7 @@ namespace PeakCSR
         {
             if (_lblStatus != null)
             {
+                // 练习期间的状态由游戏内 PracticeHud 承担, 面板只反映排位状态机
                 _lblStatus.text = mc != null
                     ? CsrLoc.T("hud.status", mc.StatusMessage)
                     : CsrLoc.T("status.not_ready");
@@ -248,6 +250,28 @@ namespace PeakCSR
 
         public void RefreshActionButtons(MatchCoordinator mc)
         {
+            // 练习态: 排位动作按钮全部隐藏, 练习开关在左侧赛制框里
+            //
+            // 注意这里的条件是"真的在练习", 而不是只看 IsActive
+            PracticeCoordinator pc = PracticeCoordinator.Instance;
+            bool practicing = pc != null
+                && pc.IsActive
+                && pc.Phase != PracticePhase.Inactive
+                && pc.Phase != PracticePhase.Switching;
+            if (practicing)
+            {
+                UiKit.SetActive(_btnAction, false);
+                UiKit.SetActive(_btnReroll, false);
+                UiKit.SetActive(_btnRerollAccept, false);
+                UiKit.SetActive(_btnRerollDecline, false);
+                UiKit.SetActive(_btnForfeit, false);
+                return;
+            }
+
+            // 练习结束/交棒失败后必须把动作按钮重新打开:
+            // 上面那条分支只关不开, 少了这一句按钮会永久消失直到重建整棵 UI 树
+            UiKit.SetActive(_btnAction, true);
+
             string actionText;
             bool actionInteractable = true;
             CsMatchState state = mc != null ? mc.State : CsMatchState.Idle;

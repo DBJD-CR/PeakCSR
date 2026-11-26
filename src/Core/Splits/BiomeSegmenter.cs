@@ -71,7 +71,25 @@ namespace PeakCSR
             if (startIdx > last) startIdx = last;
             int endIdx = routeEndIdx < 0 ? last : routeEndIdx;
             if (endIdx > last) endIdx = last;
-            if (endIdx <= startIdx) endIdx = last;
+            // 单群系迷你跑: 起点=终点是合法配置 (整局只有这一段)
+            if (endIdx < startIdx) endIdx = startIdx;
+
+            // 顶点段归一: 熔炉/城塞与顶峰是连通的 (中间没有篝火), 玩家爬到顶部点信号棒
+            // 触发飞机动画即为完赛。因此终点群系 (PEAK / 熔炉 / 城塞) 的耗时就是
+            // "到达该群系 -> 触发完赛" 这一整段, 不能把 PEAK 再切成一个 0 秒尾巴。
+            // 这里把从"最后一个非 PEAK 群系"之后的所有点视为同一段。
+            int mergeFromIdx = endIdx + 1;
+            if (endIdx >= startIdx)
+            {
+                string endTitle = NormalizeTitle(pts[endIdx].Title);
+                if (endTitle == "PEAK")
+                {
+                    // 从终点往回找到第一个非 PEAK 点, 它的下一个点就是合并段起点
+                    int k = endIdx;
+                    while (k > startIdx && NormalizeTitle(pts[k - 1].Title) == "PEAK") k--;
+                    if (k > startIdx) mergeFromIdx = k;
+                }
+            }
 
             int ordinal = 0;
             for (int i = startIdx; i <= endIdx; i++)
@@ -86,6 +104,25 @@ namespace PeakCSR
                        && string.Equals(NormalizeTitle(pts[segLastIdx + 1].Title), title, StringComparison.Ordinal))
                 {
                     segLastIdx++;
+                }
+
+                // 顶点段并入前一段: 不新增行, 直接把上一段的终点延伸到真实登顶点
+                if (mergeFromIdx <= endIdx && i >= mergeFromIdx)
+                {
+                    if (result.Count > 0)
+                    {
+                        BiomeSegment tail = result[result.Count - 1];
+                        tail.LastPointIdx = endIdx;
+                        tail.IsFinal = true;
+                        if (pts[endIdx].HasPosition)
+                        {
+                            tail.HasEndPos = true;
+                            tail.EndZ = pts[endIdx].Z;
+                            tail.EndFromCampfire = false;
+                        }
+                        result[result.Count - 1] = tail;
+                    }
+                    break;
                 }
 
                 BiomeSegment seg = new BiomeSegment();
@@ -135,6 +172,22 @@ namespace PeakCSR
             }
 
             return result;
+        }
+
+        // 段名中文化: 直接反查 PcsrBiomes 单一事实源, 查不到时回退英文 key
+        public static string LocalizeKey(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return "";
+            string normalized = NormalizeTitle(key);
+            if (string.IsNullOrEmpty(normalized)) return "";
+            for (int i = 0; i < PcsrBiomes.All.Length; i++)
+            {
+                if (string.Equals(PcsrBiomes.All[i].En, normalized, StringComparison.Ordinal))
+                {
+                    return PcsrBiomes.All[i].Zh;
+                }
+            }
+            return normalized;
         }
 
         // 段名清洗: 进度点 title 是大写英文 (SHORE / THE KILN ...),

@@ -17,7 +17,9 @@ namespace PeakCSR
 
         // 排队主轮询的房间匹配判定
         // lastOwnedRaceCode: 自己刚作废的房间在服务端可能还挂着, 绝不能再把自己送回去
-        public static bool MatchesQueue(RaceLobbyEntry item, McsrRuleFormat wantFormat, int wantAscent, string lastOwnedRaceCode)
+        // wantRated: 计分属性必须与房间一致
+        public static bool MatchesQueue(RaceLobbyEntry item, PcsrRuleFormat wantFormat, int wantAscent,
+            string lastOwnedRaceCode, bool wantRated = true)
         {
             if (item == null) return false;
             if (!item.IsLobby || item.IsFull || !item.Compatible) return false;
@@ -33,10 +35,16 @@ namespace PeakCSR
                 return false;
             }
 
-            if (item.AutoEndMs == RoomMagicCodec.GetMagicAutoEndMs(wantFormat, wantAscent)) return true;
+            // 精确匹配必须 rated 也一致
+            if (item.AutoEndMs == RoomMagicCodec.GetMagicAutoEndMs(wantFormat, wantAscent, wantRated)) return true;
+
+            // 是 PCSR 房但不是我们要的那一池 (含赛制/难度/计分任一不符): 一律不匹配
             if (RoomMagicCodec.IsCsrMagicMs(item.AutoEndMs)) return false;
 
-            McsrRuleFormat fmt;
+            // 无魔数房的兜底
+            if (wantRated) return false;
+
+            PcsrRuleFormat fmt;
             int asc;
             if (!RoomMagicCodec.TryDecodeRuleset(item.Ascent, item.Route, out fmt, out asc)) return false;
             return fmt == wantFormat && asc == wantAscent;
@@ -47,10 +55,12 @@ namespace PeakCSR
         //   2) 若双方都是房主, 用房号字典序决定谁搬家: 房号更大的主动迁移到更小的
         //      (房间号由服务端生成, 随机性足够, 双方看到同一对房号时结论必然一致)
         public static RaceLobbyEntry FindConvergeTarget(
-            List<RaceLobbyEntry> entries, string myRoomCode, McsrRuleFormat wantFormat, int wantAscent)
+            List<RaceLobbyEntry> entries, string myRoomCode, PcsrRuleFormat wantFormat, int wantAscent,
+            bool wantRated = true)
         {
             if (entries == null) return null;
 
+            int wantMagic = RoomMagicCodec.GetMagicAutoEndMs(wantFormat, wantAscent, wantRated);
             RaceLobbyEntry best = null;
             for (int i = 0; i < entries.Count; i++)
             {
@@ -58,7 +68,8 @@ namespace PeakCSR
                 if (e == null) continue;
                 if (string.Equals(e.InviteCode, myRoomCode, StringComparison.OrdinalIgnoreCase)) continue;
                 if (!RoomMagicCodec.IsCsrMagicMs(e.AutoEndMs)) continue;
-                if (e.AutoEndMs != RoomMagicCodec.GetMagicAutoEndMs(wantFormat, wantAscent)) continue;
+                // 收敛也只在同一 rated 池内进行
+                if (e.AutoEndMs != wantMagic) continue;
                 if (!e.Compatible) continue;
                 if (e.Status != "lobby" || e.IsFull) continue;
                 if (e.MaxPlayers != 2 || e.Players != 1) continue;

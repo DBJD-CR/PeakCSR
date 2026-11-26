@@ -6,20 +6,30 @@ export async function handleHistory(url, env) {
   if (!steamId) return jsonResp({ ok: false, error: "Missing steamId" }, 400);
   const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10)));
 
+  // LEFT JOIN 双方档案取昵称/Steam 名: 战报回看页必须显示对手是谁。
+  // 用 LEFT JOIN 而不是 JOIN 是因为对手可能因为清理而没留下 players 行。
   const { results } = await env.DB.prepare(
-    `SELECT match_key, invite_code, seed, winner_steam_id, loser_steam_id,
-            winner_delta, loser_delta, win_elo_before, win_elo_after,
-            lose_elo_before, lose_elo_after,
-            level_index, ascent, format, route, duration_ms,
-            winner_progress, loser_progress, verify_method, is_void, settled_at
-     FROM settled_matches
-     WHERE winner_steam_id = ? OR loser_steam_id = ?
-     ORDER BY settled_at DESC LIMIT ?`
+    `SELECT s.match_key, s.invite_code, s.seed, s.winner_steam_id, s.loser_steam_id,
+            s.winner_delta, s.loser_delta, s.win_elo_before, s.win_elo_after,
+            s.lose_elo_before, s.lose_elo_after,
+            s.level_index, s.ascent, s.format, s.route, s.duration_ms,
+            s.winner_progress, s.loser_progress, s.verify_method, s.is_void, s.settled_at,
+            wp.nickname AS winner_nickname, wp.player_name AS winner_name,
+            lp.nickname AS loser_nickname, lp.player_name AS loser_name
+     FROM settled_matches s
+     LEFT JOIN players wp ON wp.steam_id = s.winner_steam_id
+     LEFT JOIN players lp ON lp.steam_id = s.loser_steam_id
+     WHERE s.winner_steam_id = ? OR s.loser_steam_id = ?
+     ORDER BY s.settled_at DESC LIMIT ?`
   ).bind(steamId, steamId, limit).all();
 
   const history = (results || []).map(function (r) {
     const isWinner = r.winner_steam_id === steamId;
     const isVoid = !!r.is_void;
+    // 对手展示名: 优先 PCSR 昵称, 回退 Steam 名
+    const oppNick = isWinner ? r.loser_nickname : r.winner_nickname;
+    const oppName = isWinner ? r.loser_name : r.winner_name;
+    const opponentName = (oppNick && String(oppNick).trim()) || String(oppName || "").trim();
     return {
       matchKey: r.match_key,
       inviteCode: r.invite_code,
@@ -28,6 +38,7 @@ export async function handleHistory(url, env) {
       won: isVoid ? false : isWinner,
       isVoid: isVoid,
       opponentSteamId: isWinner ? r.loser_steam_id : r.winner_steam_id,
+      opponentName: opponentName,
       delta: isWinner ? r.winner_delta : r.loser_delta,
       eloBefore: isWinner ? r.win_elo_before : r.lose_elo_before,
       eloAfter: isWinner ? r.win_elo_after : r.lose_elo_after,

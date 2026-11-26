@@ -6,6 +6,9 @@ namespace PeakCSR
     public struct ProgressPointInfo
     {
         public bool HasPosition;
+        // 3D 坐标: 平路段与垂直段都要参与归一化
+        public float X;
+        public float Y;
         public float Z;
         public bool IsNadir;
         // 该点所属群系在本次地图中的序号 (用于按群系统计段数)
@@ -16,139 +19,279 @@ namespace PeakCSR
         public int BiomeRaw;
     }
 
-    // 进度几何计算 (纯函数, 不持有任何状态)
+    // 路线锚点: 本局必须依次经过的一个真实世界坐标
     //
-    // 为什么需要自己算:
-    //   RANKED 的 RawProgress 用 maxProgressPointReached 这个"离散索引"来定区间:
-    //       return (num4 + num6) / last
-    //   而 maxProgressPointReached 会被 MapHandler 切段协程里的
-    //       SetSegmentComplete(startSegment + 1)
-    //   提前推高 —— 此时玩家其实还没走到那个点的 Z 位置, 于是:
-    //       num4 从 k 变 k+1, 同时 num6 按"新段"从 0 重新算
-    //   结果进度凭空 +1/last。全山约 25 个点, 正好 4%。
-    //   单群系更严重: _singleSegment 只返回 num6 (段内锯齿),
-    //   开局站在段末 → 100%, 越过该点后立刻崩到 0%。
-    //
-    // 本类改为"以玩家真实 Z 在相邻进度点之间做连续插值", 索引只由位置决定,
-    // 因此切段/传送/点灯都不会改变已到达的位置, 进度天然连续。
+    // PointIndex >= 0 表示来自某个进度点; -1 表示来自篝火或出生点。
+    // IsSummit 表示"到达这里就等于登顶完赛"。
+    public struct ProgressAnchor
+    {
+        public float X;
+        public float Y;
+        public float Z;
+        public int PointIndex;
+        public bool IsSummit;
+    }
+
+    // 一次采样结果 (含诊断字段)
+    public struct ProgressSample
+    {
+        public bool Valid;
+        public float Progress;
+        public float Travelled;
+        public float Total;
+        // 玩家落在第几段 (清洗后主轴链的下标, 1 起)
+        public int SegmentIndex;
+        // 段内位置 (代价比, 0..1)
+        public float SegmentT;
+        // 诊断: 本次采样使用的主轴 (AxisZ / AxisY)
+        public int Axis;
+        // 诊断: 被清洗掉的"沿主轴不推进"锚点数
+        public int DroppedAnchors;
+    }
+
+    // 进度几何计算，度量用可加的线性代价
     public static class ProgressProjection
     {
-        // 计算连续进度。
-        // pts:              进度点数组 (按山体顺序, 已剔除尾部辅助 NADIR)
-        // centerZ:          本机角色 Center.z
-        // routeStartIndex:  本局路线的起点进度点索引 (全山传 0)
-        // routeEndIndex:    本局路线的终点进度点索引 (全山传 last)
-        // 返回 0..1; 无可用点时返回 -1
-        //
-        // 注意: 这个重载不接受篝火坐标, 终点会退化为"下一个进度点"
-        // 需要精确到 100% 收敛的调用方请用带 CampfireZLookup 的重载
-        public static float Compute(ProgressPointInfo[] pts, float centerZ, int routeStartIndex, int routeEndIndex)
+        // 垂直位移权重: 每 1 米"向上"海拔按这么多米路程计入
+        public const float ClimbWeight = 5f;
+
+        // 下降权重: 下坡也要花时间(控速防摔), 但远小于爬升
+        public const float DownWeight = 1f;
+
+        // 沿主轴推进量小于此值的锚点视为"原地重复点", 不单独成段
+        // 海岸路线入口篝火压在首个进度点上 (z -363 -> -364) 就是这种点
+        public const float MinAxisAdvance = 5f;
+
+        public const int AxisZ = 0;
+        public const int AxisY = 1;
+
+        // 复用缓冲区: 本方法每帧会被 UI 多次调用, 避免持续分配
+        private const int MaxChain = 64;
+        private static readonly ProgressAnchor[] _keptBuf = new ProgressAnchor[MaxChain];
+        private static readonly float[] _axisBuf = new float[MaxChain];
+        // _cumBuf[i]: 第 i 段起点的累积代价
+        private static readonly float[] _cumBuf = new float[MaxChain];
+        // _ownBuf[i]: 第 i 段自身的代价 (上一保留点 -> 本保留点)
+        private static readonly float[] _ownBuf = new float[MaxChain];
+
+        // 采样进度。纯函数, 不依赖上一帧状态
+        public static ProgressSample ComputeByAnchors(ProgressAnchor[] anchors, float px, float py, float pz)
         {
-            return Compute(pts, centerZ, routeStartIndex, routeEndIndex, null);
-        }
+            ProgressSample sample = new ProgressSample();
+            if (anchors == null || anchors.Length < 2) return sample;
+            if (float.IsNaN(px) || float.IsNaN(py) || float.IsNaN(pz)) return sample;
 
-        // campfireZAt: (段终点进度点索引) -> 该处出口篝火 Z, 取不到返回 null
-        public static float Compute(
-            ProgressPointInfo[] pts, float centerZ,
-            int routeStartIndex, int routeEndIndex,
-            Func<int, float?> campfireZAt)
-        {
-            if (pts == null || pts.Length < 2) return -1f;
+            // 主轴: 跨度大的那个轴就是推进方向 (仅用于定段与清洗, 不参与代价)
+            int axis = ChooseAxis(anchors);
+            sample.Axis = axis;
+            float playerAxis = axis == AxisZ ? pz : py;
 
-            // 尾部 NADIR 之外的辅助点不参与分母计算 (与 RANKED 的 last 语义对齐)
-            int last = pts.Length - 1;
-            while (last > 0 && pts[last].IsNadir) last--;
-            if (last < 1) return -1f;
+            // 清洗锚点, 得到严格递增的主轴链
+            int count;
+            int dropped;
+            if (!BuildMonotonicChain(anchors, axis, out count, out dropped)) return sample;
+            sample.DroppedAnchors = dropped;
 
-            int spanStart = routeStartIndex < 0 ? 0 : routeStartIndex;
-            if (spanStart > last) spanStart = last;
-            int spanEnd = routeEndIndex < 0 ? last : routeEndIndex;
-            if (spanEnd > last) spanEnd = last;
-            if (spanEnd <= spanStart) spanEnd = last;
+            float total = _cumBuf[count - 1] + _ownBuf[count - 1];
+            // 锚点几乎全部重合说明链取错了 (例如入口/出口篝火查成同一个)
+            if (total <= 1f) return sample;
 
-            // 段终点坐标: 优先篝火, 退化时才用进度点
-            float endZ = ResolveEndZ(pts, spanEnd, campfireZAt, last);
+            // 1) 主轴决定段号
+            int seg = LocateSegment(count, playerAxis);
 
-            // 关键: 索引只由"真实位置"决定, 不使用 maxProgressPointReached。
-            // 与游戏 CheckReached 同判据 (Center.z > point.z), 但这里只取插值区间。
-            int reached = -1;
-            int positionedCount = 0;
-            for (int i = 0; i <= last; i++)
-            {
-                if (!pts[i].HasPosition) continue;
-                positionedCount++;
-                if (centerZ > pts[i].Z) reached = i;
-            }
+            // 2) 段内用代价比决定走了多少 (与段长同一口径, 天然对齐)
+            float t = SegmentCostRatio(seg, py, pz);
 
-            // 几何不可用, 交给调用方回退到 raw
-            if (positionedCount == 0) return -1f;
-
-            // 还没越过第一个点: 位于起点之前的引道, 视为 0
-            if (reached < 0) return 0f;
-
-            float startZ = pts[spanStart].HasPosition ? pts[spanStart].Z : pts[0].Z;
-            // 已经越过整个路线终点段: 真正到顶
-            if (reached >= spanEnd && centerZ >= endZ) return 1f;
-
-            // 段内插值: 每段用自己的 [点Z, 段终点Z] 区间
-            float absolute = 0f;
-            float totalSpan = 0f;
-            float acc = 0f;
-            for (int i = spanStart; i <= spanEnd; i++)
-            {
-                float segStartZ = PickZ(pts, i, startZ);
-                float segEndZ = (i == spanEnd) ? endZ : PickZ(pts, i + 1, segStartZ);
-                float segSpan = segEndZ - segStartZ;
-                if (segSpan <= 0.5f) segSpan = 0.5f;
-                totalSpan += segSpan;
-
-                if (centerZ >= segStartZ)
-                {
-                    // 玩家已进入 (或越过) 这一段: 累加整段, 最后一小段做插值
-                    float localFrac = (centerZ - segStartZ) / segSpan;
-                    if (localFrac > 1f) localFrac = 1f;
-                    if (i == spanEnd)
-                    {
-                        acc += localFrac * segSpan;
-                    }
-                    else
-                    {
-                        acc += segSpan;
-                    }
-                }
-                // centerZ < segStartZ 时后续段一律未到达, 不再累加
-            }
-
-            absolute = acc;
-            if (totalSpan <= 0.01f) return 0f;
-            float result = absolute / totalSpan;
+            float travelled = _cumBuf[seg] + t * _ownBuf[seg];
+            float result = travelled / total;
+            // 坐标异常 (NaN) 会让整条计算链产出 NaN, 这里判定为本次采样无效,
+            // 交给调用方回退, 而不是把一个 NaN 当成合法进度往上传
+            if (float.IsNaN(result) || float.IsInfinity(result)) return sample;
             if (result < 0f) result = 0f;
             if (result > 1f) result = 1f;
-            return result;
+
+            sample.Valid = true;
+            sample.Progress = result;
+            sample.Travelled = travelled;
+            sample.Total = total;
+            sample.SegmentIndex = seg;
+            sample.SegmentT = t;
+            return sample;
         }
 
-        private static float PickZ(ProgressPointInfo[] pts, int index, float fallback)
+        // 主轴 = 跨度更大的那个轴。Z 是常规水平推进方向,
+        // 纯竖井/竖直路线 Z 跨度小, 会自动切到 Y 当主轴
+        private static int ChooseAxis(ProgressAnchor[] anchors)
         {
-            if (index < 0 || index >= pts.Length) return fallback;
-            return pts[index].HasPosition ? pts[index].Z : fallback;
-        }
-
-        // 段终点 Z: 篝火优先, 取不到才回退到进度点
-        private static float ResolveEndZ(ProgressPointInfo[] pts, int spanEnd, Func<int, float?> campfireZAt, int last)
-        {
-            if (campfireZAt != null)
+            float zMin = float.MaxValue, zMax = float.MinValue;
+            float yMin = float.MaxValue, yMax = float.MinValue;
+            for (int i = 0; i < anchors.Length; i++)
             {
-                try
-                {
-                    float? fireZ = campfireZAt(spanEnd);
-                    if (fireZ.HasValue) return fireZ.Value;
-                }
-                catch
-                {
-                }
+                float z = anchors[i].Z;
+                float y = anchors[i].Y;
+                if (z < zMin) zMin = z;
+                if (z > zMax) zMax = z;
+                if (y < yMin) yMin = y;
+                if (y > yMax) yMax = y;
             }
-            if (spanEnd < pts.Length && pts[spanEnd].HasPosition) return pts[spanEnd].Z;
-            return pts[last].HasPosition ? pts[last].Z : 0f;
+            return (zMax - zMin) >= (yMax - yMin) ? AxisZ : AxisY;
+        }
+
+        private static float AxisValue(ProgressAnchor a, int axis)
+        {
+            return axis == AxisZ ? a.Z : a.Y;
+        }
+
+        // 保留首点, 之后只保留"沿主轴推进 >= MinAxisAdvance"的点。
+        //
+        // 被丢弃锚点只做去重, 不贡献任何代价
+        private static bool BuildMonotonicChain(ProgressAnchor[] src, int axis, out int count, out int dropped)
+        {
+            count = 0;
+            dropped = 0;
+            if (src == null || src.Length < 2) return false;
+
+            _keptBuf[0] = src[0];
+            _axisBuf[0] = AxisValue(src[0], axis);
+            _cumBuf[0] = 0f;
+            _ownBuf[0] = 0f;
+            count = 1;
+
+            for (int k = 1; k < src.Length; k++)
+            {
+                float here = AxisValue(src[k], axis);
+
+                // 反向点 (here < last) 与原地重复点一样不单独成段
+                if (here - _axisBuf[count - 1] < MinAxisAdvance)
+                {
+                    dropped++;
+                    continue;
+                }
+
+                if (count >= MaxChain) return false;
+
+                _cumBuf[count] = _cumBuf[count - 1] + _ownBuf[count - 1];
+                // 段代价 = 上一保留点到本保留点的直线代价, 与分子口径完全一致
+                _ownBuf[count] = StepCost(_keptBuf[count - 1], src[k]);
+                _axisBuf[count] = here;
+                _keptBuf[count] = src[k];
+                count++;
+            }
+
+            return count >= 2;
+        }
+
+        // 主轴严格递增, 玩家落点唯一确定一段 (只返回段号, 段内位置交给代价比)
+        private static int LocateSegment(int count, float playerAxis)
+        {
+            int last = count - 1;
+            if (playerAxis <= _axisBuf[0]) return 1;
+            if (playerAxis >= _axisBuf[last]) return last;
+
+            for (int i = 1; i <= last; i++)
+            {
+                if (playerAxis < _axisBuf[i]) return i;
+            }
+            return last;
+        }
+
+        // 段内位置 = 玩家已付代价 / 本段总代价
+        //
+        // 分子与分母用同一个 StepCost, 所以:
+        //   玩家正好在段起点 -> 0
+        //   玩家正好在段终点 -> 1 (与下一段的 0 无缝衔接)
+        // 横向偏离不产生任何代价, 不会让进度虚高
+        private static float SegmentCostRatio(int seg, float py, float pz)
+        {
+            float own = _ownBuf[seg];
+            if (own <= 0.0001f) return 0f;
+
+            ProgressAnchor a = _keptBuf[seg - 1];
+            float paid = StepCost(pz - a.Z, py - a.Y);
+
+            float t = paid / own;
+            if (t < 0f) t = 0f;
+            if (t > 1f) t = 1f;
+            return t;
+        }
+
+        // 单腿代价: 水平推进按 1 计, 爬升按 ClimbWeight 计, 下降按 DownWeight 计
+        //
+        // 只用 Z 作为水平项, 不用 X
+        private static float StepCost(float dz, float dy)
+        {
+            return Math.Abs(dz) + WeightedDy(dy);
+        }
+
+        private static float StepCost(ProgressAnchor a, ProgressAnchor b)
+        {
+            return StepCost(b.Z - a.Z, b.Y - a.Y);
+        }
+
+        private static float WeightedDy(float dy)
+        {
+            return dy >= 0f ? dy * ClimbWeight : -dy * DownWeight;
+        }
+
+        // 诊断用: 完整描述真实计算口径 (主轴 / 丢弃点 / 每段 dy dz 与代价占比)
+        // 只读, 不参与任何判定
+        public static string ChainSummary(ProgressAnchor[] anchors)
+        {
+            if (anchors == null || anchors.Length < 2) return "(锚点不足)";
+
+            int axis = ChooseAxis(anchors);
+            int count;
+            int dropped;
+            if (!BuildMonotonicChain(anchors, axis, out count, out dropped)) return "(清洗后不足 2 点)";
+
+            float total = _cumBuf[count - 1] + _ownBuf[count - 1];
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.Append("主轴=").Append(axis == AxisZ ? "Z" : "Y");
+            sb.Append(" 丢弃=").Append(dropped);
+            sb.Append(" 锚点=").Append(count);
+            sb.Append(" 总代价=").Append(total.ToString("F0"));
+            for (int i = 1; i < count; i++)
+            {
+                float dy = _keptBuf[i].Y - _keptBuf[i - 1].Y;
+                float dz = _keptBuf[i].Z - _keptBuf[i - 1].Z;
+                float pct = total > 0.01f ? _ownBuf[i] / total * 100f : 0f;
+                sb.Append(" | 段").Append(i)
+                  .Append(" dy=").Append(dy.ToString("F0"))
+                  .Append(" dz=").Append(dz.ToString("F0"))
+                  .Append(" 占").Append(pct.ToString("F0")).Append('%');
+            }
+            return sb.ToString();
+        }
+
+        // 锚点链总代价 (诊断用, 与 ComputeByAnchors 的 total 口径一致)
+        public static float TotalLength(ProgressAnchor[] anchors)
+        {
+            if (anchors == null || anchors.Length < 2) return 0f;
+            int count;
+            int dropped;
+            if (!BuildMonotonicChain(anchors, ChooseAxis(anchors), out count, out dropped)) return 0f;
+            return _cumBuf[count - 1] + _ownBuf[count - 1];
+        }
+
+        // 未加权 3D 欧氏总长 (诊断用, 用于对比加权前后的量级)
+        public static float RawLength(ProgressAnchor[] anchors)
+        {
+            if (anchors == null || anchors.Length < 2) return 0f;
+            float total = 0f;
+            for (int k = 1; k < anchors.Length; k++)
+            {
+                float dx = anchors[k].X - anchors[k - 1].X;
+                float dy = anchors[k].Y - anchors[k - 1].Y;
+                float dz = anchors[k].Z - anchors[k - 1].Z;
+                total += (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            }
+            return total;
+        }
+
+        // 单段代价 (诊断用, 与段长完全一致)
+        public static float SegmentLength(ProgressAnchor a, ProgressAnchor b)
+        {
+            return StepCost(a, b);
         }
     }
 }

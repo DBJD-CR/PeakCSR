@@ -14,7 +14,7 @@ namespace PeakCSR
 
         public static void Confirm(string message, Action onConfirm)
         {
-            Show("PEAK CSR", message, new[]
+            Show(CsrLoc.T("app.brand"), message, new[]
             {
                 new Option(CsrLoc.T("win.btn.confirm"), onConfirm),
                 new Option(CsrLoc.T("win.btn.cancel"), null)

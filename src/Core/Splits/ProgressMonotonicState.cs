@@ -15,6 +15,9 @@ namespace PeakCSR
 
         private static float _lastReported;
         private static bool _hasLast;
+        // 天底阶段需要一次合法的"回落"
+        // 单调保护只削偶发抖动, 这个是一次性的语义位移, 必须显式放行。
+        private static bool _allowOneRollback;
         // 上一帧是否因为完赛被强制推到 1.0
         private static bool _lockedToFinish;
         // 锁定后连续读到"未完赛"的帧数: 用于区分"完赛状态抖动"与"锁定了伪值"
@@ -34,6 +37,14 @@ namespace PeakCSR
             _unfinishedFramesSinceLock = 0;
             _observedPeak = 0f;
             _hasObserved = false;
+            _allowOneRollback = false;
+        }
+
+        // 放行一次大跨度回落 (天底阶段切换)
+        // 只影响下一帧的单调判定, 不会修改已记录观测峰值
+        public static void AllowOneRollback()
+        {
+            _allowOneRollback = true;
         }
 
         // 本局真实到达过的最高进度 (战报与上报的唯一真值)
@@ -47,6 +58,12 @@ namespace PeakCSR
         // finished: 确认"我自己"已经登顶完赛
         public static float Correct(float value, bool finished)
         {
+            // NaN 在这里拦掉
+            if (float.IsNaN(value) || float.IsInfinity(value))
+            {
+                // 保留上一帧的已知值, 没有历史值时按 0 处理
+                return _hasLast ? _lastReported : 0f;
+            }
             if (value < 0f) value = 0f;
             if (value > 1f) value = 1f;
 
@@ -102,12 +119,19 @@ namespace PeakCSR
                 return 1f;
             }
 
-            // 单调不减, 容忍极小幅回落吸收采样噪声
+            // 天底切换: 一次性放行回落, 用真实值重设基准, 之后继续单调
+            if (_allowOneRollback)
+            {
+                _allowOneRollback = false;
+                _lastReported = value;
+                return value;
+            }
+
+            // 单调不减。容差只能削"回落", 不能削"上升"
             const float Tolerance = 0.002f;
-            float best = value - Tolerance;
-            if (_lastReported > best) best = _lastReported;
-            _lastReported = best;
-            return best;
+            if (value > _lastReported) _lastReported = value;
+            else if (value < _lastReported - Tolerance) _lastReported = value;
+            return _lastReported;
         }
 
         // 记录观测峰值 (只增不减)

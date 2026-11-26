@@ -8,15 +8,18 @@
 #
 # Usage (run from repo root):
 #   .\tools\pcsr-admin.ps1 -Action recent
-#   .\tools\pcsr-admin.ps1 -Action void -MatchKey "ABC123|123456789" -Note "opponent拔线"
+#   .\tools\pcsr-admin.ps1 -Action recent -VerifyMethod reporter_self_win_unverified
+#   .\tools\pcsr-admin.ps1 -Action void -MatchKey "ABC123|123456789" -Note "opponent left"
 #   .\tools\pcsr-admin.ps1 -Action void -InviteCode ABC123 -Seed 123456789
 #   .\tools\pcsr-admin.ps1 -Action set-elo -SteamId 7656119xxxxxxxxxx -Elo 1500
+#   .\tools\pcsr-admin.ps1 -Action list-pbs -SteamId 7656119xxxxxxxxxx
+#   .\tools\pcsr-admin.ps1 -Action delete-pb -SteamId 7656119xxxxxxxxxx -Category 3 -SubKey 4
 #   .\tools\pcsr-admin.ps1 -Action reset
 #   .\tools\pcsr-admin.ps1 -Action wipe
 
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("recent", "void", "set-elo", "reset", "wipe")]
+    [ValidateSet("recent", "void", "set-elo", "list-pbs", "delete-pb", "reset", "wipe")]
     [string]$Action,
 
     # Worker root URL, e.g. https://peakcsr-ladder.xxx.workers.dev
@@ -36,8 +39,18 @@ param(
     [string]$SteamId,
     [int]$Elo = 0,
 
+    # list-pbs / delete-pb: PB category and subKey
+    #   category 0=AllPeak 1=Ascent 2=Sprint 3=BiomeSegment
+    #   subKey = biome index (see PcsrBiomes.All) for sprint/segment, ascent level for ascent
+    #   MESA (mesa biome) = biome index 4
+    [int]$Category = -1,
+    [int]$SubKey = -1,
+
     # recent
     [int]$Limit = 20,
+    # optional filter for recent: exact match on verify_method
+    # common value: reporter_self_win_unverified (self-reported win without proof; audit periodically)
+    [string]$VerifyMethod = "",
 
     # audit note
     [string]$Note = ""
@@ -60,6 +73,9 @@ $payload = @{ action = $Action; note = $Note }
 switch ($Action) {
     "recent" {
         $payload.limit = $Limit
+        if (-not [string]::IsNullOrWhiteSpace($VerifyMethod)) {
+            $payload.verifyMethod = $VerifyMethod
+        }
     }
     "void" {
         if (-not [string]::IsNullOrWhiteSpace($MatchKey)) {
@@ -81,6 +97,25 @@ switch ($Action) {
         }
         $payload.steamId = $SteamId.Trim()
         $payload.elo = $Elo
+    }
+    "list-pbs" {
+        if ([string]::IsNullOrWhiteSpace($SteamId)) {
+            Write-Host "list-pbs requires -SteamId" -ForegroundColor Red
+            exit 1
+        }
+        $payload.steamId = $SteamId.Trim()
+    }
+    "delete-pb" {
+        if ([string]::IsNullOrWhiteSpace($SteamId) -or $Category -lt 0) {
+            Write-Host "delete-pb requires -SteamId and -Category" -ForegroundColor Red
+            exit 1
+        }
+        $payload.steamId = $SteamId.Trim()
+        $payload.category = $Category
+        # omit SubKey = delete every entry under this category
+        if ($SubKey -ge 0) { $payload.subKey = $SubKey }
+        $subLabel = if ($SubKey -ge 0) { "$SubKey" } else { "*" }
+        Write-Host ("WARNING: deleting PB for " + $SteamId.Trim() + " category=" + $Category + " subKey=" + $subLabel) -ForegroundColor Yellow
     }
     "reset" { }
     "wipe" {
@@ -118,7 +153,23 @@ catch {
     exit 1
 }
 
-if ($Action -eq "recent" -and $resp.matches) {
+if ($Action -eq "list-pbs" -and $resp.pbs) {
+    $catNames = @("AllPeak", "Ascent", "Sprint", "Segment")
+    Write-Host ""
+    Write-Host ("PBs for " + $resp.steamId + " (" + $resp.count + " entries):") -ForegroundColor Cyan
+    $resp.pbs | ForEach-Object {
+        [pscustomobject]@{
+            Category = $catNames[$_.category]
+            SubKey   = $_.sub_key
+            TimeMs   = $_.time_ms
+            Time     = ([timespan]::FromMilliseconds([double]$_.time_ms)).ToString("mm\:ss\.fff")
+            Level    = $_.level_index
+            Seed     = $_.seed
+            Format   = $_.format
+        }
+    } | Format-Table -AutoSize
+}
+elseif ($Action -eq "recent" -and $resp.matches) {
     $epoch = [datetime]"1970-01-01T00:00:00Z"
     $modeNames = @("FullPeak", "Hardcore", "Sprint")
 

@@ -1,3 +1,4 @@
+using PeakCSR.Practice;
 using RankedPeak.Ui.Native;
 using TMPro;
 using UnityEngine;
@@ -11,25 +12,25 @@ namespace PeakCSR
     // MatchHistoryPanel / LeaderboardPanel 承担; 语言切换原地刷新不销毁 UI 树
     public class PcsrMenuWindow : MonoBehaviour
     {
-        private const float WindowWidth = 1300f;
-        private const float WindowHeight = 1090f;
-        private const float TitleBarHeight = 82f;
         private const float RefreshInterval = 0.2f;
-        private const float ColGap = 18f;
 
-        // 行高与左右分栏
-        private const float LeftX = 26f;
-        private const float LeftW = 600f;
-        private const float RightX = 26f + 600f + ColGap;
-        private const float RightW = 630f;
-        private const float Row1Y = 8f;
-        private const float Row1H = 380f;
-        private const float Row2Y = Row1Y + Row1H + ColGap;
-        private const float Row2H = 250f;
-        private const float Row3Y = Row2Y + Row2H + ColGap;
-        // 表头 30 + 8 行 x 22 + 上下留白 = 约 300
-        private const float Row3H = 306f;
-        private const float FullW = 1248f;
+        // 布局常量全部收敛到 MenuLayout, 这里只做别名
+        private const float WindowWidth = MenuLayout.WindowWidth;
+        private const float WindowHeight = MenuLayout.WindowHeight;
+        private const float TitleBarHeight = MenuLayout.TitleBarHeight;
+        private const float ColGap = MenuLayout.ColGap;
+        private const float LeftX = MenuLayout.LeftX;
+        private const float LeftW = MenuLayout.LeftW;
+        private const float RightX = MenuLayout.RightX;
+        private const float RightW = MenuLayout.RightW;
+        private const float Row1Y = MenuLayout.Row1Y;
+        private const float Row1H = MenuLayout.Row1H;
+        private const float Row2Y = MenuLayout.Row2Y;
+        private const float Row2H = MenuLayout.Row2H;
+        private const float Row3Y = MenuLayout.Row3Y;
+        private const float Row3H = MenuLayout.Row3H;
+        private const float Row3W = MenuLayout.Row3W;
+        private const float HistoryH = MenuLayout.HistoryH;
 
         private static PcsrMenuWindow _instance;
         public static PcsrMenuWindow Instance { get { return _instance; } }
@@ -41,7 +42,7 @@ namespace PeakCSR
         private bool _open;
         private float _nextRefresh;
 
-        // 5 大子面板
+        // 5 大子面板 (练习入口内嵌在 RulesetPanel 的按钮行, 状态复用 MatchStatusPanel)
         private RulesetPanel _rulesPanel;
         private MatchStatusPanel _statusPanel;
         private LiveQueuePanel _queuePanel;
@@ -67,16 +68,26 @@ namespace PeakCSR
             CsrLoc.OnLanguageChanged -= OnLanguageChanged;
         }
 
-        // 一旦真正进入跑图阶段就收起窗口, 让原生 HUD 完整可见
+        // 进入跑图阶段时自动收起, 但每局只收一次
+        private bool _autoClosedForThisMatch;
+
         private void OnMatchStateChanged()
         {
             if (!_open) return;
             MatchCoordinator mc = MatchCoordinator.Instance;
-            if (mc == null) return;
-            if (mc.IsInGamePhase)
+            PracticeCoordinator pc = PracticeCoordinator.Instance;
+            bool practicing = pc != null && pc.IsActive && pc.Phase == PracticePhase.Running;
+            bool inGame = practicing || (mc != null && mc.IsInGamePhase);
+
+            // 阶段恢复为非对局: 复位标记, 让下一局仍能享受一次自动收起
+            if (!inGame)
             {
-                Close();
+                _autoClosedForThisMatch = false;
+                return;
             }
+            if (_autoClosedForThisMatch) return;
+            _autoClosedForThisMatch = true;
+            Close();
         }
 
         // 原地热切语言: 刷新全部 LocalizedTextBinder 绑定与动态数据, 不再 Destroy 重建整棵 UI 树
@@ -183,15 +194,17 @@ namespace PeakCSR
 
             _window = PeakWindowStyle.CreateWindow(
                 _root, "PcsrWindow", WindowWidth, WindowHeight, TitleBarHeight,
-                "PEAK CSR", CsrLoc.T("win.subtitle"));
+                CsrLoc.T("app.brand"), CsrLoc.T("win.subtitle"));
             _body = _window.Body;
 
             BuildTitleBar();
             _rulesPanel = new RulesetPanel(this, _body, LeftX, Row1Y, LeftW, Row1H);
             _statusPanel = new MatchStatusPanel(this, _body, RightX, Row1Y, RightW, Row1H);
             _queuePanel = new LiveQueuePanel(this, _body, LeftX, Row2Y, LeftW, Row2H);
-            _historyPanel = new MatchHistoryPanel(this, _body, RightX, Row2Y, RightW, Row2H);
-            _boardPanel = new LeaderboardPanel(this, _body, LeftX, Row3Y, FullW, Row3H);
+            // 历史战绩纵向贯穿 Row2 + Row3, 与左列天梯底边对齐
+            _historyPanel = new MatchHistoryPanel(this, _body, RightX, Row2Y, RightW, HistoryH);
+            // 天梯速览收成单列宽, 吃掉实时匹配下方的空白区
+            _boardPanel = new LeaderboardPanel(this, _body, LeftX, Row3Y, Row3W, Row3H);
 
             _built = true;
             _root.gameObject.SetActive(false);
@@ -220,8 +233,7 @@ namespace PeakCSR
             profile.onClick.AddListener(new UnityAction(OnMyProfileClicked));
             LocalizedTextBinder.BindPill(profile, "win.btn.profile");
 
-            // 语言切换 Pill: 紧挨左侧 "PEAK CSR" 标题 (标题 40px 约 200px 宽),
-            // "中文 / EN" 19px 约 90px 宽, 110 足够且右缘 360 不碰 416 起的副标题
+            // 语言切换 Pill: 紧挨左侧品牌标题
             Button lang = PeakWindowStyle.CreatePill(
                 _window.TitleBar, "BtnLang", "中文 / EN", 250f, 20f, 110f, 42f, 19f);
             UiKit.TintOnBar(lang);
@@ -273,12 +285,26 @@ namespace PeakCSR
         public void RefreshDynamic()
         {
             MatchCoordinator mc = MatchCoordinator.Instance;
+            // 练习开关的显隐随"计分/练习"模式与练习态变化, 走高频刷新即时反映
+            if (_rulesPanel != null) _rulesPanel.RefreshPracticeButton();
             if (_statusPanel != null) _statusPanel.RefreshStatus(mc);
             if (_queuePanel != null) _queuePanel.Refresh(mc);
             if (_statusPanel != null) _statusPanel.RefreshMatchInfo(mc);
             if (_statusPanel != null) _statusPanel.RefreshActionButtons(mc);
             if (_historyPanel != null) _historyPanel.Refresh(mc);
             if (_boardPanel != null) _boardPanel.Refresh(mc);
+        }
+
+        // 供 LeaderboardPanel 打开完整天梯独立窗口
+        internal void OpenFullBoard()
+        {
+            LadderBoardView.ShowWindow();
+        }
+
+        // 供 MatchHistoryPanel 打开战报回看
+        internal void OpenHistoryReport(CsrHistoryEntry entry)
+        {
+            HistoryReportView.Show(entry);
         }
     }
 }

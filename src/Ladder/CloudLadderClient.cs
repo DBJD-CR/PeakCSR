@@ -21,6 +21,7 @@ namespace PeakCSR
         public int Wins;
         public int Losses;
         public int Streak;
+        public int BestStreak;
         // 分赛制战绩: 0 = 全山, 1 = 高难天阶, 2 = 单群系
         public int WinsAllPeak;
         public int LossesAllPeak;
@@ -32,8 +33,11 @@ namespace PeakCSR
         public int GamesHardcore;
         public int GamesSprint;
         public int FavoriteMap = -1;
+        public int DislikedMap = -1;
         public int FavoriteAscent = -999;
         public int FavoriteFormat = -1;
+        // 国籍 (ISO 3166-1 alpha-2 大写), 空串 = 未设置
+        public string Country = PcsrCountries.Unset;
 
         public string DisplayName
         {
@@ -59,6 +63,7 @@ namespace PeakCSR
         public int Losses;
         public int Draws;
         public int Streak;
+        public int BestStreak;
         public int WinsAllPeak;
         public int LossesAllPeak;
         public int WinsHardcore;
@@ -69,8 +74,10 @@ namespace PeakCSR
         public int GamesHardcore;
         public int GamesSprint;
         public int FavoriteMap = -1;
+        public int DislikedMap = -1;
         public int FavoriteAscent = -999;
         public int FavoriteFormat = -1;
+        public string Country = PcsrCountries.Unset;
         public int GlobalRank;
         public bool Loaded;
 
@@ -98,6 +105,7 @@ namespace PeakCSR
                 Wins = e.Wins,
                 Losses = e.Losses,
                 Streak = e.Streak,
+                BestStreak = e.BestStreak,
                 WinsAllPeak = e.WinsAllPeak,
                 LossesAllPeak = e.LossesAllPeak,
                 WinsHardcore = e.WinsHardcore,
@@ -108,8 +116,10 @@ namespace PeakCSR
                 GamesHardcore = e.GamesHardcore,
                 GamesSprint = e.GamesSprint,
                 FavoriteMap = e.FavoriteMap,
+                DislikedMap = e.DislikedMap,
                 FavoriteAscent = e.FavoriteAscent,
                 FavoriteFormat = e.FavoriteFormat,
+                Country = e.Country,
                 GlobalRank = e.Rank,
                 Loaded = true
             };
@@ -133,6 +143,16 @@ namespace PeakCSR
     }
 
     // 云端历史战绩行 (原 CsrHistoryEntry)
+    // 云端战报分段行 (与 match_splits 的 JSON 结构一致)
+    public sealed class CloudSplitDto
+    {
+        public string Key = "";
+        public long SegMs;
+        public long CumMs;
+        public bool Estimated;
+        public bool Reached;
+    }
+
     public sealed class CsrHistoryEntry
     {
         public string MatchKey = "";
@@ -141,6 +161,7 @@ namespace PeakCSR
         public bool Won;
         public bool IsVoid;
         public string OpponentSteamId = "";
+        // 云端 history 现在 LEFT JOIN players 带回对手昵称, 老库没留行时为空
         public string OpponentName = "";
         public int Delta;
         public int EloBefore;
@@ -161,9 +182,12 @@ namespace PeakCSR
     public sealed class CloudLadderClient
     {
         private const string SharedCloudSalt = "PEAKCSR_CLOUD_V1_2026";
+        // PB 上传的合理区间, 必须与 cloudflare/src/handlers/pbs.js 的 MIN/MAX_TIME_MS 一致
+        private const long PbUploadMinMs = 30L * 1000L;
+        private const long PbUploadMaxMs = 6L * 60L * 60L * 1000L;
         private const string DefaultWorkerUrl = "https://peakcsr-ladder.3405689090.workers.dev";
-        // 与天梯表格行数保持一致
-        private const int LeaderboardFetchLimit = 8;
+        // 完整天梯窗口的容量上限
+        private const int LeaderboardFetchLimit = 50;
 
         private readonly Func<string> _baseUrlSource;
 
@@ -310,6 +334,7 @@ namespace PeakCSR
                                 Wins = Int(item, "wins", 0),
                                 Losses = Int(item, "losses", 0),
                                 Streak = Int(item, "streak", 0),
+                                BestStreak = Int(item, "best_streak", 0),
                                 WinsAllPeak = Int(item, "wins_all_peak", 0),
                                 LossesAllPeak = Int(item, "losses_all_peak", 0),
                                 WinsHardcore = Int(item, "wins_hardcore", 0),
@@ -320,8 +345,10 @@ namespace PeakCSR
                                 GamesHardcore = Int(item, "games_hardcore", 0),
                                 GamesSprint = Int(item, "games_sprint", 0),
                                 FavoriteMap = Int(item, "favorite_map", -1),
+                                DislikedMap = Int(item, "disliked_map", -1),
                                 FavoriteAscent = Int(item, "favorite_ascent", -999),
-                                FavoriteFormat = Int(item, "favorite_format", -1)
+                                FavoriteFormat = Int(item, "favorite_format", -1),
+                                Country = PcsrCountries.Normalize(Str(item, "country", ""))
                             });
                         }
                     }
@@ -368,6 +395,198 @@ namespace PeakCSR
             }
         }
 
+        // ===== PB 同步 =====
+
+        // 批量上传 PB: 服务端按"更快才覆盖"幂等处理, 重复提交无害
+        public IEnumerator PushPbs(List<PersonalBest> pbs, Action<bool, string> onDone)
+        {
+            string steamId = SteamIdentity.GetSteamId64();
+            if (string.IsNullOrEmpty(steamId))
+            {
+                if (onDone != null) onDone(false, "no_steam_id");
+                yield break;
+            }
+            if (pbs == null || pbs.Count == 0)
+            {
+                if (onDone != null) onDone(true, "");
+                yield break;
+            }
+
+            JArray arr = new JArray();
+            // 签名用的规范化串必须与服务端完全一致: 排序后拼 category:subKey:timeMs
+            //
+            // 剔除规则也要与服务端逐条对齐 (category/subKey 范围、timeMs 区间),
+            // 否则服务端多剔除一条就会导致签名集合不同、永远 403。
+            List<string> sigParts = new List<string>();
+            for (int i = 0; i < pbs.Count; i++)
+            {
+                PersonalBest pb = pbs[i];
+                if (pb == null || !pb.IsValid) continue;
+                // 与服务端 clampCategory / clampSubKey 的取值域一致
+                int cat = (int)pb.Key.Category;
+                if (cat < 0 || cat > 3) continue;
+                if (pb.Key.SubKey < 0 || pb.Key.SubKey > 15) continue;
+                // 与服务端 MIN/MAX_TIME_MS 一致 (30s ~ 6h)
+                if (pb.TimeMs < PbUploadMinMs || pb.TimeMs > PbUploadMaxMs) continue;
+
+                arr.Add(new JObject
+                {
+                    ["category"] = cat,
+                    ["subKey"] = pb.Key.SubKey,
+                    ["timeMs"] = pb.TimeMs,
+                    ["levelIndex"] = pb.LevelIndex,
+                    ["seed"] = pb.Seed,
+                    ["ascent"] = pb.Ascent,
+                    ["format"] = (int)pb.Format,
+                    // 达成时间随 PB 一起上行
+                    ["achievedAt"] = pb.AchievedAtMs
+                });
+                sigParts.Add(cat + ":" + pb.Key.SubKey + ":" + pb.TimeMs);
+            }
+            if (arr.Count == 0)
+            {
+                // 全部被剔除: 返回失败让调用方 RequeuePendingUpload
+                // 同时留一条日志便于定位区间漂移
+                PcsrLog.LogWarning("[PeakCSR] PB 上传候选全部被本地区间校验剔除 ("
+                    + pbs.Count + " 条), 回退到待补传队列。");
+                if (onDone != null) onDone(false, "all_entries_filtered");
+                yield break;
+            }
+            sigParts.Sort(StringComparer.Ordinal);
+            string rawSigStr = steamId + "|" + string.Join(",", sigParts.ToArray()) + "|" + SharedCloudSalt;
+            string sig = ComputeSha256Hex16(rawSigStr);
+
+            JObject payload = new JObject
+            {
+                ["steamId"] = steamId,
+                ["pbs"] = arr,
+                ["signature"] = sig
+            };
+
+            bool ok = false;
+            string err = "";
+            yield return PostJson(BaseUrl() + "/api/pbs", payload, delegate(bool success, string body, string error)
+            {
+                ok = success;
+                if (!success) err = ParseProfileError(body) ?? error;
+            });
+            if (onDone != null) onDone(ok, err);
+        }
+
+        // 拉取某个玩家的全部 PB
+        public IEnumerator FetchPbs(string steamId, Action<List<PersonalBest>> onDone)
+        {
+            if (string.IsNullOrEmpty(steamId))
+            {
+                if (onDone != null) onDone(null);
+                yield break;
+            }
+            string url = BaseUrl() + "/api/pbs?steamId=" + UnityWebRequest.EscapeURL(steamId);
+            using (UnityWebRequest req = UnityWebRequest.Get(url))
+            {
+                req.timeout = 8;
+                yield return req.SendWebRequest();
+                if (HasRequestFailed(req))
+                {
+                    if (onDone != null) onDone(null);
+                    yield break;
+                }
+                try
+                {
+                    JObject root = JObject.Parse(req.downloadHandler.text);
+                    JArray arr = root["pbs"] as JArray;
+                    if (arr == null)
+                    {
+                        if (onDone != null) onDone(null);
+                        yield break;
+                    }
+                    List<PersonalBest> list = new List<PersonalBest>();
+                    for (int i = 0; i < arr.Count; i++)
+                    {
+                        JToken it = arr[i];
+                        list.Add(new PersonalBest
+                        {
+                            Key = new PbKey((PbCategory)Int(it, "category", -1), Int(it, "subKey", -1)),
+                            TimeMs = Long(it, "timeMs", 0),
+                            LevelIndex = Int(it, "levelIndex", 0),
+                            Seed = Int(it, "seed", 0),
+                            Ascent = Int(it, "ascent", 0),
+                            Format = (PcsrRuleFormat)Int(it, "format", 0),
+                            AchievedAtMs = Long(it, "achievedAt", 0)
+                        });
+                    }
+                    if (onDone != null) onDone(list);
+                }
+                catch (Exception ex)
+                {
+                    PcsrLog.LogWarning("[PeakCSR] 解析云端 PB 失败: " + ex.Message);
+                    if (onDone != null) onDone(null);
+                }
+            }
+        }
+
+        // ===== 战报分段详情 =====
+
+        // 单场战报分段: 本地归档未命中时才调用
+        // onDone(我方分段, 对手分段); 两者都为 null 表示云端也没有
+        public IEnumerator FetchReportDetail(string matchKey, Action<List<CloudSplitDto>, List<CloudSplitDto>> onDone)
+        {
+            string steamId = SteamIdentity.GetSteamId64();
+            if (string.IsNullOrEmpty(matchKey) || string.IsNullOrEmpty(steamId))
+            {
+                if (onDone != null) onDone(null, null);
+                yield break;
+            }
+            string url = BaseUrl() + "/api/reportdetail?matchKey=" + UnityWebRequest.EscapeURL(matchKey)
+                + "&steamId=" + UnityWebRequest.EscapeURL(steamId);
+            using (UnityWebRequest req = UnityWebRequest.Get(url))
+            {
+                req.timeout = 8;
+                yield return req.SendWebRequest();
+                if (HasRequestFailed(req))
+                {
+                    if (onDone != null) onDone(null, null);
+                    yield break;
+                }
+                try
+                {
+                    JObject root = JObject.Parse(req.downloadHandler.text);
+                    bool found = root["found"] != null && root["found"].Type != JTokenType.Null
+                        && root["found"].Value<bool>();
+                    if (!found)
+                    {
+                        if (onDone != null) onDone(null, null);
+                        yield break;
+                    }
+                    if (onDone != null) onDone(ParseSplits(root["mySplits"] as JArray), ParseSplits(root["oppSplits"] as JArray));
+                }
+                catch (Exception ex)
+                {
+                    PcsrLog.LogWarning("[PeakCSR] 解析战报分段失败: " + ex.Message);
+                    if (onDone != null) onDone(null, null);
+                }
+            }
+        }
+
+        private static List<CloudSplitDto> ParseSplits(JArray arr)
+        {
+            if (arr == null) return null;
+            List<CloudSplitDto> list = new List<CloudSplitDto>();
+            for (int i = 0; i < arr.Count; i++)
+            {
+                JToken it = arr[i];
+                list.Add(new CloudSplitDto
+                {
+                    Key = Str(it, "key"),
+                    SegMs = Long(it, "segMs", 0),
+                    CumMs = Long(it, "cumMs", 0),
+                    Estimated = Bool(it, "est"),
+                    Reached = Bool(it, "reached")
+                });
+            }
+            return list;
+        }
+
         public IEnumerator FetchHistory(string steamId, Action<List<CsrHistoryEntry>> onDone)
         {
             string url = BaseUrl() + "/api/history?limit=20&steamId=" + UnityWebRequest.EscapeURL(steamId);
@@ -406,6 +625,7 @@ namespace PeakCSR
                                 Won = Bool(item, "won"),
                                 IsVoid = Bool(item, "isVoid"),
                                 OpponentSteamId = Str(item, "opponentSteamId"),
+                                OpponentName = Str(item, "opponentName"),
                                 Delta = Int(item, "delta", 0),
                                 EloBefore = Int(item, "eloBefore", 0),
                                 EloAfter = Int(item, "eloAfter", 0),
@@ -433,10 +653,20 @@ namespace PeakCSR
             }
         }
 
-        // keepNickname = true 时云端完全不碰昵称字段 (昵称编辑器的那条 "" 才是真正的清空)
+        // 兼容旧调用: 不带国籍时按未设置上传
         public IEnumerator PushProfile(
-            int favoriteMap, int favoriteAscent, int favoriteFormat, string nickname, bool keepNickname,
+            int favoriteMap, int dislikedMap, int favoriteAscent, int favoriteFormat, string nickname, bool keepNickname,
             Action<bool, string> onDone)
+        {
+            return PushProfile(favoriteMap, dislikedMap, favoriteAscent, favoriteFormat, nickname, keepNickname,
+                PcsrCountries.Unset, onDone);
+        }
+
+        // keepNickname = true 时云端完全不碰昵称字段 (昵称编辑器的那条 "" 才是真正的清空)
+        // country: 已归一的国籍码, 空串表示未设置
+        public IEnumerator PushProfile(
+            int favoriteMap, int dislikedMap, int favoriteAscent, int favoriteFormat, string nickname, bool keepNickname,
+            string country, Action<bool, string> onDone)
         {
             string steamId = SteamIdentity.GetSteamId64();
             if (string.IsNullOrEmpty(steamId))
@@ -445,9 +675,12 @@ namespace PeakCSR
                 yield break;
             }
 
-            // 签名顺序必须与 Worker 的 handleProfileUpdate 完全一致
-            string rawSigStr = steamId + "|" + favoriteMap + "|" + favoriteAscent + "|" + favoriteFormat
-                + "|" + nickname + "|" + (keepNickname ? 1 : 0) + "|" + SharedCloudSalt;
+            // 国籍在客户端先归一, 非主权代码根本不会离开本机
+            string safeCountry = PcsrCountries.Normalize(country);
+
+            // 签名顺序与 Worker 的 handleProfileUpdate 完全一致
+            string rawSigStr = steamId + "|" + favoriteMap + "|" + dislikedMap + "|" + favoriteAscent + "|" + favoriteFormat
+                + "|" + nickname + "|" + (keepNickname ? 1 : 0) + "|" + safeCountry + "|" + SharedCloudSalt;
             string sig = ComputeSha256Hex16(rawSigStr);
 
             JObject payload = new JObject
@@ -460,8 +693,10 @@ namespace PeakCSR
                 ["nickname"] = nickname ?? "",
                 ["keepNickname"] = keepNickname,
                 ["favoriteMap"] = favoriteMap,
+                ["dislikedMap"] = dislikedMap,
                 ["favoriteAscent"] = favoriteAscent,
                 ["favoriteFormat"] = favoriteFormat,
+                ["country"] = safeCountry,
                 ["signature"] = sig
             };
 
@@ -485,11 +720,31 @@ namespace PeakCSR
         }
 
         // 上报重试节奏 (秒)
-        private static readonly float[] ReportRetryOffsets = { 0f, 3f, 8f, 15f, 25f, 38f };
+        private static readonly float[] ReportRetryOffsets = { 0f, 3f, 10f, 25f };
+
+        private static JArray BuildSplitsArray(List<CloudSplitDto> splits)
+        {
+            if (splits == null || splits.Count == 0) return null;
+            JArray arr = new JArray();
+            for (int i = 0; i < splits.Count && i < 16; i++)
+            {
+                CloudSplitDto s = splits[i];
+                if (s == null || string.IsNullOrEmpty(s.Key) || s.CumMs <= 0) continue;
+                arr.Add(new JObject
+                {
+                    ["key"] = s.Key,
+                    ["segMs"] = s.SegMs,
+                    ["cumMs"] = s.CumMs,
+                    ["est"] = s.Estimated,
+                    ["reached"] = s.Reached
+                });
+            }
+            return arr.Count > 0 ? arr : null;
+        }
 
         public IEnumerator ReportMatch(
             string inviteCode, string opponentSteamId, string opponentName, int opponentElo,
-            string winnerSteamId, int seed, int levelIndex, int ascent, McsrRuleFormat format, int route,
+            string winnerSteamId, int seed, int levelIndex, int ascent, PcsrRuleFormat format, int route,
             long durationMs, float myProgress01, float oppProgress01, bool isVoid, string voidReason,
             Action<ReportResult> onSettled)
         {
@@ -501,9 +756,21 @@ namespace PeakCSR
         // singleShot = true: 只请求一次, 由外部队列控制重投节奏
         public IEnumerator ReportMatch(
             string inviteCode, string opponentSteamId, string opponentName, int opponentElo,
-            string winnerSteamId, int seed, int levelIndex, int ascent, McsrRuleFormat format, int route,
+            string winnerSteamId, int seed, int levelIndex, int ascent, PcsrRuleFormat format, int route,
             long durationMs, float myProgress01, float oppProgress01, bool isVoid, string voidReason,
             Action<ReportResult> onSettled, bool useRetryLadder)
+        {
+            return ReportMatch(inviteCode, opponentSteamId, opponentName, opponentElo, winnerSteamId,
+                seed, levelIndex, ascent, format, route, durationMs, myProgress01, oppProgress01,
+                isVoid, voidReason, onSettled, useRetryLadder, null);
+        }
+
+        // mySplits: 我方分段 (可选, 不参与签名). 服务端按上报方身份写入 winner/loser 对应列
+        public IEnumerator ReportMatch(
+            string inviteCode, string opponentSteamId, string opponentName, int opponentElo,
+            string winnerSteamId, int seed, int levelIndex, int ascent, PcsrRuleFormat format, int route,
+            long durationMs, float myProgress01, float oppProgress01, bool isVoid, string voidReason,
+            Action<ReportResult> onSettled, bool useRetryLadder, List<CloudSplitDto> mySplits)
         {
             string mySteamId = SteamIdentity.GetSteamId64();
             string myName = PlayerNameSanitizer.Current();
@@ -544,6 +811,10 @@ namespace PeakCSR
                 ["signature"] = sig
             };
 
+            // 分段不参与签名: 伪造分段没有收益 (不影响 ELO), 服务端会做长度与类型钳制
+            JArray splitsArr = BuildSplitsArray(mySplits);
+            if (splitsArr != null) payload["mySplits"] = splitsArr;
+
             int attempts = useRetryLadder ? ReportRetryOffsets.Length : 1;
             ReportResult lastResult = null;
             for (int attempt = 0; attempt < attempts; attempt++)
@@ -556,7 +827,8 @@ namespace PeakCSR
 
                 ReportResult result = null;
                 string lastError = null;
-                yield return PostJson(BaseUrl() + "/api/report", payload, delegate(bool success, string body, string error)
+                string reportUrl = BaseUrl() + "/api/report";
+                yield return PostJson(reportUrl, payload, delegate(bool success, string body, string error)
                 {
                     if (success)
                     {
@@ -573,6 +845,29 @@ namespace PeakCSR
                         lastError = error;
                     }
                 });
+
+                // SSL/TLS 握手失败就地抢修一次: 换全新 TLS 连接重发
+                if (result == null && IsTransientTlsError(lastError))
+                {
+                    PcsrLog.LogInfo("[PeakCSR] 战报 SSL 握手失败，重建 TLS 连接重试: " + lastError);
+                    lastError = null;
+                    yield return PostJsonFreshTls(reportUrl, payload, delegate(bool success, string body, string error)
+                    {
+                        if (success)
+                        {
+                            result = ParseReportResponse(body);
+                            if (result == null)
+                            {
+                                string raw = body ?? "";
+                                lastError = "unparsable response: " + raw.Substring(0, System.Math.Min(160, raw.Length));
+                            }
+                        }
+                        else
+                        {
+                            lastError = error;
+                        }
+                    });
+                }
 
                 if (result != null && result.Settled)
                 {
@@ -621,6 +916,8 @@ namespace PeakCSR
         {
             public bool Settled;
             public bool IsVoid;
+            // 云端给出 pending 时的具体原因 (上游未通过的环节), 用于线上定位
+            public string UpstreamReason = "";
             // -1 表示响应里没有权威分 (云端仍在等对手/待上游核验)。
             public int AuthElo = -1;
             public string VerifyMethod = "cloud";
@@ -652,6 +949,7 @@ namespace PeakCSR
                     catch { r.AuthElo = -1; }
                 }
                 r.VerifyMethod = resp["verifyMethod"] != null ? resp["verifyMethod"].ToString() : "cloud";
+                r.UpstreamReason = resp["upstreamReason"] != null ? resp["upstreamReason"].ToString() : "";
                 return r;
             }
             catch
@@ -689,6 +987,44 @@ namespace PeakCSR
             }
         }
 
+        // UnityWebRequest 的 SSL 握手失败是"整条连接建不起来", 重发同一条请求多半还是失败。
+        // 这里改用一次全新的长连接 (KeepAlive 关掉, 强制重建 TLS 会话) 再试一次
+        private static IEnumerator PostJsonFreshTls(string url, JObject payload, Action<bool, string, string> onDone)
+        {
+            yield return new WaitForSecondsRealtime(0.6f);
+            byte[] bodyBytes = Encoding.UTF8.GetBytes(payload.ToString());
+            using (UnityWebRequest req = new UnityWebRequest(url, "POST"))
+            {
+                req.uploadHandler = new UploadHandlerRaw(bodyBytes);
+                req.downloadHandler = new DownloadHandlerBuffer();
+                req.SetRequestHeader("Content-Type", "application/json");
+                req.SetRequestHeader("Connection", "close");
+                req.disposeCertificateHandlerOnDispose = true;
+                req.disposeDownloadHandlerOnDispose = true;
+                req.timeout = 15;
+                yield return req.SendWebRequest();
+
+                string body = req.downloadHandler != null ? req.downloadHandler.text : "";
+                if (HasRequestFailed(req))
+                {
+                    if (onDone != null) onDone(false, body, req.error);
+                }
+                else
+                {
+                    if (onDone != null) onDone(true, body, null);
+                }
+            }
+        }
+
+        // SSL 握手类错误: 值得换条新连接再试一次 (其他错误如 4xx/403 重试没有意义)
+        private static bool IsTransientTlsError(string error)
+        {
+            if (string.IsNullOrEmpty(error)) return false;
+            string e = error.ToLowerInvariant();
+            return e.Contains("ssl") || e.Contains("tls") || e.Contains("certificate")
+                || e.Contains("connection reset") || e.Contains("cannot connect");
+        }
+
         // 从错误响应里取出可读错误码, 便于界面翻译 (Nickname already taken / Nickname cooldown)
         private static string ParseProfileError(string body)
         {
@@ -722,6 +1058,7 @@ namespace PeakCSR
                 Losses = Int(prof, "losses", 0),
                 Draws = Int(prof, "draws", 0),
                 Streak = Int(prof, "streak", 0),
+                BestStreak = Int(prof, "best_streak", 0),
                 WinsAllPeak = Int(prof, "wins_all_peak", 0),
                 LossesAllPeak = Int(prof, "losses_all_peak", 0),
                 WinsHardcore = Int(prof, "wins_hardcore", 0),
@@ -732,8 +1069,10 @@ namespace PeakCSR
                 GamesHardcore = Int(prof, "games_hardcore", 0),
                 GamesSprint = Int(prof, "games_sprint", 0),
                 FavoriteMap = Int(prof, "favorite_map", -1),
+                DislikedMap = Int(prof, "disliked_map", -1),
                 FavoriteAscent = Int(prof, "favorite_ascent", -999),
-                FavoriteFormat = Int(prof, "favorite_format", -1)
+                FavoriteFormat = Int(prof, "favorite_format", -1),
+                Country = PcsrCountries.Normalize(Str(prof, "country", ""))
             };
         }
 
@@ -778,6 +1117,14 @@ namespace PeakCSR
         public static string BiomeLabel(int levelIndex)
         {
             try { return RankedPeak.Services.MapCatalog.GetBiomeLabel(levelIndex) ?? ""; }
+            catch { return ""; }
+        }
+
+        // 原始群系签名 (未经 S->G 的显示替换)
+        // GetBiomeLabel 会把下标 >=1 的 'S' 改成 'G', 按位反查会把非首位的海岸误判成雾沼
+        public static string RawBiomeSignature(int levelIndex)
+        {
+            try { return RankedPeak.Services.MapCatalog.GetBiomeId(levelIndex) ?? ""; }
             catch { return ""; }
         }
     }
